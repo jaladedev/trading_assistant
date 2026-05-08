@@ -279,7 +279,7 @@ export default function CandleChart() {
   }, [drawPrice, drawRSI, drawVol]);
 
   // RSI value display
-  const latestRSI = rsiVals.filter((v: null) => v !== null).slice(-1)[0] as number | undefined;
+  const latestRSI = rsiVals.filter((v: number | null) => v !== null).slice(-1)[0] as number | undefined;
   const rsiColor  = latestRSI !== undefined ? (latestRSI > 70 ? '#ff3d5a' : latestRSI < 30 ? '#00e5a0' : '#ffb82e') : 'var(--amber)';
   const stackLabel = e9 !== null && e20 !== null && e50 !== null
     ? e9 > e20 && e20 > e50 ? { text: '▲ BULLISH', color: '#00e5a0', bg: 'rgba(0,229,160,0.1)' }

@@ -17,17 +17,20 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+
+    "paths": {
+      "@/*": ["./app/*"]
+    },
+
+    "ignoreDeprecations": "6.0",
+
     "plugins": [
       {
         "name": "next"
       }
-    ],
-    "paths": {
-      "@/*": [
-        "./app/*"
-      ]
-    }
+    ]
   },
+
   "include": [
     "next-env.d.ts",
     "**/*.ts",
@@ -36,6 +39,7 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
+
   "exclude": [
     "node_modules"
   ]
