@@ -1,10 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Candle, CrossoverEvent, RSIState } from './indicators';
+import type { Candle, CrossoverEvent, RSIState, VWAPState, CVDState } from './indicators';  
 import {
   updEMA, emaK, calcWilderRSI, makeRSIState, computeSuggestion,
   scoreEntryQuality,
+  calcVWAP, makeVWAPState, calcCVD, makeCVDState,
 } from './indicators';
+
+
 
 // ──────────────────────────────────────────────────────────
 //  Types
@@ -63,12 +66,20 @@ interface ChartSlice {
   connLabel: string;
   suggestion: Suggestion | null;
   entryQuality: EntryQuality | null;
+  vwapVals:      (number | null)[];
+  cvdBarDeltas:  number[];
+  cvdCumDeltas:  number[];
   // Internal RSI state (not persisted)
   _rsiState: RSIState;
   _prevClose: number | null;
   _e9: number | null;
   _e20: number | null;
   _e50: number | null;
+  _vwapState:  VWAPState; 
+  _cvdState:   CVDState;   
+  _liveVwap:   number | null;
+  _liveCvdBar: number | null;
+  _liveCvdCum: number | null;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -152,8 +163,16 @@ const defaultChart: ChartSlice = {
   currentCandle: null, lastCandleTime: 0,
   connStatus: 'idle', connLabel: 'Connecting…',
   suggestion: null, entryQuality: null,
+  vwapVals:     [],
+  cvdBarDeltas: [],
+  cvdCumDeltas: [],
   _rsiState: makeRSIState(), _prevClose: null,
   _e9: null, _e20: null, _e50: null,
+  _vwapState: makeVWAPState(),
+  _cvdState: makeCVDState(),
+  _liveVwap:   null,
+  _liveCvdBar: null,
+  _liveCvdCum: null,
 };
 
 const defaultCalc: CalcSlice = {
@@ -188,6 +207,8 @@ export const useStore = create<StoreState>()(
         _rsiState: makeRSIState(),
         _prevClose: null,
         _e9: null, _e20: null, _e50: null,
+        _vwapState: makeVWAPState(),
+        _cvdState: makeCVDState(),
       }),
 
       addCandleToState: (c) => {
@@ -201,6 +222,15 @@ export const useStore = create<StoreState>()(
         const rsiState = { ...s._rsiState };
         const rsiVal   = calcWilderRSI(c.c, s._prevClose, rsiState);
 
+        // ── VWAP ──────────────────────────────────────────
+        const vwapState = { ...s._vwapState };
+        const vwapVal   = calcVWAP(c, vwapState);
+
+        // ── CVD ───────────────────────────────────────────
+        const cvdState = { ...s._cvdState };
+        const { barDelta, cumDelta } = calcCVD(c, cvdState);
+
+        // ── Crossovers ────────────────────────────────────
         let newCrossovers = [...s.crossovers];
         if (prevE9 !== null && prevE20 !== null) {
           const bull = prevE9 <= (s._e20 ?? 0) && newE9 > newE20;
@@ -211,49 +241,88 @@ export const useStore = create<StoreState>()(
           }
         }
 
-        let newCandles  = [...s.candles, c];
-        let newE9s      = [...s.e9s, newE9];
-        let newE20s     = [...s.e20s, newE20];
-        let newE50s     = [...s.e50s, newE50];
-        let newRsiVals  = [...s.rsiVals, rsiVal];
+        // ── Append all series ─────────────────────────────
+        let newCandles      = [...s.candles, c];
+        let newE9s          = [...s.e9s,          newE9];
+        let newE20s         = [...s.e20s,         newE20];
+        let newE50s         = [...s.e50s,         newE50];
+        let newRsiVals      = [...s.rsiVals,      rsiVal];
+        let newVwapVals     = [...s.vwapVals,     vwapVal];
+        let newCvdBarDeltas = [...s.cvdBarDeltas, barDelta];
+        let newCvdCumDeltas = [...s.cvdCumDeltas, cumDelta];
 
+        // ── Trim to 150 candles ───────────────────────────
         if (newCandles.length > 150) {
-          newCandles.shift(); newE9s.shift(); newE20s.shift(); newE50s.shift(); newRsiVals.shift();
+          newCandles.shift();
+          newE9s.shift(); newE20s.shift(); newE50s.shift(); newRsiVals.shift();
+          newVwapVals.shift(); newCvdBarDeltas.shift(); newCvdCumDeltas.shift();
           newCrossovers = newCrossovers.map(x => ({ ...x, idx: x.idx - 1 })).filter(x => x.idx >= 0);
         }
 
         set({
-          candles: newCandles, e9s: newE9s, e20s: newE20s, e50s: newE50s, rsiVals: newRsiVals,
+          candles:      newCandles,
+          e9s:          newE9s,
+          e20s:         newE20s,
+          e50s:         newE50s,
+          rsiVals:      newRsiVals,
+          vwapVals:     newVwapVals,
+          cvdBarDeltas: newCvdBarDeltas,
+          cvdCumDeltas: newCvdCumDeltas,
           e9: newE9, e20: newE20, e50: newE50,
           crossovers: newCrossovers,
           _e9: newE9, _e20: newE20, _e50: newE50,
-          _prevClose: c.c, _rsiState: rsiState,
+          _prevClose: c.c,
+          _rsiState:  rsiState,
+          _vwapState: vwapState,
+          _cvdState:  cvdState,
         });
       },
 
-      setCurrentCandle: (c) => set({ currentCandle: c }),
+      setCurrentCandle: (c) => {
+        if (!c) return set({ currentCandle: null });
+        const s = get();
+        // Preview VWAP and CVD for the live unclosed bar.
+        // Use spread copies so the stored state objects are never mutated prematurely.
+        const vwapPreview              = calcVWAP(c, { ...s._vwapState });
+        const { barDelta, cumDelta }   = calcCVD(c,  { ...s._cvdState  });
+        set({
+          currentCandle: c,
+          _liveVwap:   vwapPreview,
+          _liveCvdBar: barDelta,
+          _liveCvdCum: cumDelta,
+        });
+      },
 
       setLivePrice: (price, apiName) => {
         const s = get();
         const tf   = s.tf;
         const prev = s.livePrice;
-        let cur = s.currentCandle;
-        const now = Date.now();
+        let cur    = s.currentCandle;
+        const now  = Date.now();
 
         if (!cur) {
           cur = { o: price, h: price, l: price, c: price, v: 500, t: now };
           set({ currentCandle: cur, lastCandleTime: now, livePrice: price, prevLivePrice: prev });
         } else {
-          const updated: Candle = { ...cur, c: price, h: Math.max(cur.h, price), l: Math.min(cur.l, price), v: cur.v + 50 + Math.random() * 200 };
-          set({ currentCandle: updated, livePrice: price, prevLivePrice: prev });
+          const updated: Candle = {
+            ...cur,
+            c: price,
+            h: Math.max(cur.h, price),
+            l: Math.min(cur.l, price),
+            v: cur.v + 50 + Math.random() * 200,
+          };
+          // Route through setCurrentCandle so VWAP/CVD previews stay in sync
+          get().setCurrentCandle(updated);
+          set({ livePrice: price, prevLivePrice: prev });
         }
 
         // Close candle if interval elapsed
-        const interval = { '1m':60000,'5m':300000,'15m':900000,'1h':3600000,'4h':14400000,'1d':86400000 }[tf] ?? 300000;
+        const interval = { '1m': 60000, '5m': 300000, '15m': 900000, '1h': 3600000, '4h': 14400000, '1d': 86400000 }[tf] ?? 300000;
         if (now - get().lastCandleTime >= interval) {
           const finished = get().currentCandle;
           if (finished) get().addCandleToState({ ...finished });
-          set({ currentCandle: { o: price, h: price, l: price, c: price, v: 500, t: now }, lastCandleTime: now });
+          get().setCurrentCandle({ o: price, h: price, l: price, c: price, v: 500, t: now });
+          set({ lastCandleTime: now });
         }
 
         get().refreshSuggestion();

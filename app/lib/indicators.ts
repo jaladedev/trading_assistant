@@ -14,6 +14,8 @@ export interface CrossoverEvent {
   time: number;
 }
 
+// ── EMA ───────────────────────────────────────────────────────────────────────
+
 /** k multiplier for EMA */
 export const emaK = (period: number) => 2 / (period + 1);
 
@@ -21,6 +23,8 @@ export const emaK = (period: number) => 2 / (period + 1);
 export function updEMA(prev: number | null, value: number, k: number): number {
   return prev === null ? value : value * k + prev * (1 - k);
 }
+
+// ── Formatting ────────────────────────────────────────────────────────────────
 
 /** Format price based on magnitude */
 export function fmtPrice(p: number | null | undefined): string {
@@ -45,6 +49,8 @@ export function fmtSymDisplay(s: string): string {
   };
   return m[s] || s.replace('USDT', '/USDT');
 }
+
+// ── RSI (Wilder) ──────────────────────────────────────────────────────────────
 
 /** Wilder RMA RSI state — must be held externally and passed per tick */
 export interface RSIState {
@@ -88,6 +94,125 @@ export function calcWilderRSI(
   return (state.avgLoss ?? 0) === 0 ? 100 : Math.round(100 - 100 / (1 + rs));
 }
 
+// ── VWAP ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Session VWAP state.
+ * Resets when the candle's UTC day differs from the last candle's UTC day.
+ */
+export interface VWAPState {
+  cumPV:    number;   // Σ (typical_price × volume)
+  cumVol:   number;   // Σ volume
+  lastDay:  number;   // UTC day-of-year used for session reset
+}
+
+export function makeVWAPState(): VWAPState {
+  return { cumPV: 0, cumVol: 0, lastDay: -1 };
+}
+
+/**
+ * Calculates VWAP for a single candle, mutating `state` in-place.
+ * Session resets at UTC midnight.
+ * Returns the current session VWAP, or null if no volume has accumulated yet.
+ */
+export function calcVWAP(candle: Candle, state: VWAPState): number | null {
+  const d   = new Date(candle.t);
+  const day = Math.floor(candle.t / 86_400_000); // UTC day integer
+
+  // Reset at start of new session
+  if (day !== state.lastDay) {
+    state.cumPV  = 0;
+    state.cumVol = 0;
+    state.lastDay = day;
+  }
+
+  const typical = (candle.h + candle.l + candle.c) / 3;
+  state.cumPV  += typical * candle.v;
+  state.cumVol += candle.v;
+
+  return state.cumVol === 0 ? null : state.cumPV / state.cumVol;
+}
+
+/**
+ * Batch-calculate VWAP for an array of candles, returning one value per candle.
+ * Useful for initial history load.
+ */
+export function calcVWAPSeries(candles: Candle[]): (number | null)[] {
+  const state = makeVWAPState();
+  return candles.map(c => calcVWAP(c, state));
+}
+
+// ── CVD (Cumulative Volume Delta) ─────────────────────────────────────────────
+
+/**
+ * Volume Delta approximation using close-vs-open:
+ *   - Bullish candle (c >= o): all volume attributed to buyers  → delta = +v
+ *   - Bearish candle (c <  o): all volume attributed to sellers → delta = -v
+ *
+ * A more precise method (trade-by-trade) requires tick data. This candle-level
+ * proxy is standard for OHLCV-only feeds.
+ *
+ * For a finer estimate, the wick-weighted formula is also available:
+ *   buyVol  = v × (c - l) / (h - l)
+ *   sellVol = v × (h - c) / (h - l)
+ *   delta   = buyVol - sellVol
+ * Set `wickWeighted = true` to use it.
+ */
+export function candleDelta(candle: Candle, wickWeighted = true): number {
+  if (wickWeighted) {
+    const range = candle.h - candle.l;
+    if (range === 0) return 0;
+    const buyVol  = candle.v * (candle.c - candle.l) / range;
+    const sellVol = candle.v * (candle.h - candle.c) / range;
+    return buyVol - sellVol;
+  }
+  return candle.c >= candle.o ? candle.v : -candle.v;
+}
+
+export interface CVDState {
+  cumDelta: number;
+}
+
+export function makeCVDState(): CVDState {
+  return { cumDelta: 0 };
+}
+
+/**
+ * Incremental CVD update. Returns [barDelta, cumDelta].
+ * `barDelta`  — the delta for this single candle (useful for histogram colouring)
+ * `cumDelta`  — the running cumulative total
+ */
+export function calcCVD(
+  candle: Candle,
+  state: CVDState,
+  wickWeighted = true
+): { barDelta: number; cumDelta: number } {
+  const barDelta = candleDelta(candle, wickWeighted);
+  state.cumDelta += barDelta;
+  return { barDelta, cumDelta: state.cumDelta };
+}
+
+/**
+ * Batch-calculate CVD for an array of candles.
+ * Returns parallel arrays: barDeltas and cumDeltas.
+ */
+export function calcCVDSeries(
+  candles: Candle[],
+  wickWeighted = true
+): { barDeltas: number[]; cumDeltas: number[] } {
+  const state = makeCVDState();
+  const barDeltas: number[]  = [];
+  const cumDeltas: number[]  = [];
+  for (const c of candles) {
+    const { barDelta, cumDelta } = calcCVD(c, state, wickWeighted);
+    barDeltas.push(barDelta);
+    cumDeltas.push(cumDelta);
+  }
+  return { barDeltas, cumDeltas };
+}
+
+// ── Entry scoring ─────────────────────────────────────────────────────────────
+
 /** Score entry quality 0-100 */
 export function scoreEntryQuality(
   dir: 'long' | 'short',
@@ -102,23 +227,23 @@ export function scoreEntryQuality(
   const factors: string[] = [];
 
   if (dir === 'long') {
-    if (e9 > e20 && e20 > e50)     { score += 30; factors.push('Full bullish stack'); }
-    else if (e9 > e50)              { score += 15; factors.push('Price above EMA50'); }
+    if (e9 > e20 && e20 > e50)      { score += 30; factors.push('Full bullish stack'); }
+    else if (e9 > e50)               { score += 15; factors.push('Price above EMA50'); }
   } else {
-    if (e9 < e20 && e20 < e50)     { score += 30; factors.push('Full bearish stack'); }
-    else if (e9 < e50)              { score += 15; factors.push('Price below EMA50'); }
+    if (e9 < e20 && e20 < e50)      { score += 30; factors.push('Full bearish stack'); }
+    else if (e9 < e50)               { score += 15; factors.push('Price below EMA50'); }
   }
 
   if (dir === 'long') {
-    if (rsi > 50 && rsi < 65)       { score += 25; factors.push('RSI momentum zone'); }
-    else if (rsi >= 40 && rsi <= 50){ score += 15; factors.push('RSI midzone'); }
-    else if (rsi < 35)              { score += 20; factors.push('RSI oversold bounce'); }
-    else if (rsi >= 65)             { score -= 10; factors.push('RSI overbought'); }
+    if (rsi > 50 && rsi < 65)        { score += 25; factors.push('RSI momentum zone'); }
+    else if (rsi >= 40 && rsi <= 50) { score += 15; factors.push('RSI midzone'); }
+    else if (rsi < 35)               { score += 20; factors.push('RSI oversold bounce'); }
+    else if (rsi >= 65)              { score -= 10; factors.push('RSI overbought'); }
   } else {
-    if (rsi < 50 && rsi > 35)      { score += 25; factors.push('RSI bearish momentum'); }
-    else if (rsi >= 50 && rsi <= 60){ score += 15; factors.push('RSI midzone'); }
-    else if (rsi > 65)              { score += 20; factors.push('RSI overbought fade'); }
-    else if (rsi <= 35)             { score -= 10; factors.push('RSI oversold'); }
+    if (rsi < 50 && rsi > 35)       { score += 25; factors.push('RSI bearish momentum'); }
+    else if (rsi >= 50 && rsi <= 60) { score += 15; factors.push('RSI midzone'); }
+    else if (rsi > 65)               { score += 20; factors.push('RSI overbought fade'); }
+    else if (rsi <= 35)              { score -= 10; factors.push('RSI oversold'); }
   }
 
   if (dir === 'long'  && price > e20) { score += 20; factors.push('Price > EMA20'); }
@@ -141,6 +266,8 @@ export function scoreEntryQuality(
 
   return { score, label, cls, factors };
 }
+
+// ── Trade suggestion ──────────────────────────────────────────────────────────
 
 /** Compute 3-EMA setup suggestion */
 export function computeSuggestion(
