@@ -40,8 +40,8 @@ export default function CandleChart() {
     const n    = vis.length;
     if (n < 2) return;
 
-    const pMin = Math.min(...vis.map(c => c.l));
-    const pMax = Math.max(...vis.map(c => c.h));
+    const pMin = Math.min(...vis.map((c: { l: any; }) => c.l));
+    const pMax = Math.max(...vis.map((c: { h: any; }) => c.h));
     const pad  = (pMax - pMin) * 0.06 || pMax * 0.001;
     const plo  = pMin - pad, phi = pMax + pad;
     const pR   = phi - plo || 1;
@@ -91,7 +91,7 @@ export default function CandleChart() {
     }
 
     // Candles
-    vis.forEach((c, i) => {
+    vis.forEach((c: { c: number; o: number; h: number; l: number; }, i: number) => {
       const x  = tx(i);
       const bw = Math.max(2, cw * 0.62);
       const isLast = i === n - 1;
@@ -114,7 +114,7 @@ export default function CandleChart() {
       if (!vals || vals.length < 2) return;
       ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
       ctx.beginPath(); let started = false;
-      vals.forEach((v, i) => {
+      vals.forEach((v: number | null, i: number) => {
         if (v === null) { started = false; return; }
         const xi = tx(i), yi = ty(v as number);
         if (!started) { ctx.moveTo(xi, yi); started = true; } else ctx.lineTo(xi, yi);
@@ -124,7 +124,7 @@ export default function CandleChart() {
 
     // Crossover markers
     const visOff = all.length - n;
-    crossovers.forEach(x => {
+    crossovers.forEach((x: { idx: number; price: any; type: string; }) => {
       const vi = x.idx - visOff;
       if (vi < 0 || vi >= n) return;
       const cx_ = tx(vi);
@@ -174,7 +174,7 @@ export default function CandleChart() {
 
     const rv = rsiVals.slice(-n);
     const validPts = rv
-      .map((v, i) => v !== null ? { x: txr(i + (n - rv.length)), y: ty(v as number), v } : null)
+      .map((v: number | null, i: number) => v !== null ? { x: txr(i + (n - rv.length)), y: ty(v as number), v } : null)
       .filter(Boolean) as { x: number; y: number; v: number }[];
 
     if (validPts.length > 1) {
@@ -203,8 +203,8 @@ export default function CandleChart() {
     const all = [...candles, currentCandle].filter(Boolean) as typeof candles;
     const vis = all.slice(-70);
     if (!vis.length) return;
-    const maxV  = Math.max(...vis.map(c => c.v));
-    const avgV  = vis.reduce((a, c) => a + c.v, 0) / vis.length;
+    const maxV  = Math.max(...vis.map((c: { v: any; }) => c.v));
+    const avgV  = vis.reduce((a: any, c: { v: any; }) => a + c.v, 0) / vis.length;
     const padR  = 66, padL = 2, padT = 4, padB = 2;
     const cW    = w - padR - padL, cH = h - padT - padB;
     const cw    = cW / vis.length;
@@ -213,7 +213,7 @@ export default function CandleChart() {
     ctx.setLineDash([3, 3]);
     ctx.beginPath(); ctx.moveTo(padL, avgY); ctx.lineTo(padL + cW, avgY); ctx.stroke();
     ctx.setLineDash([]);
-    vis.forEach((c, i) => {
+    vis.forEach((c: { v: number; c: number; o: number; }, i: number) => {
       const isLast   = i === vis.length - 1;
       const aboveAvg = c.v > avgV;
       ctx.fillStyle = isLast
@@ -279,7 +279,7 @@ export default function CandleChart() {
   }, [drawPrice, drawRSI, drawVol]);
 
   // RSI value display
-  const latestRSI = rsiVals.filter(v => v !== null).slice(-1)[0] as number | undefined;
+  const latestRSI = rsiVals.filter((v: null) => v !== null).slice(-1)[0] as number | undefined;
   const rsiColor  = latestRSI !== undefined ? (latestRSI > 70 ? '#ff3d5a' : latestRSI < 30 ? '#00e5a0' : '#ffb82e') : 'var(--amber)';
   const stackLabel = e9 !== null && e20 !== null && e50 !== null
     ? e9 > e20 && e20 > e50 ? { text: '▲ BULLISH', color: '#00e5a0', bg: 'rgba(0,229,160,0.1)' }
