@@ -29,10 +29,18 @@ export function updEMA(prev: number | null, value: number, k: number): number {
 /** Format price based on magnitude */
 export function fmtPrice(p: number | null | undefined): string {
   if (p === null || p === undefined || isNaN(p as number)) return '—';
-  if (p > 10000) return p.toFixed(1);
-  if (p > 1000)  return p.toFixed(2);
-  if (p > 10)    return p.toFixed(3);
-  return p.toFixed(4);
+  if (p >= 10000)  return p.toFixed(1);
+  if (p >= 1000)   return p.toFixed(2);
+  if (p >= 10)     return p.toFixed(3);
+  if (p >= 1)      return p.toFixed(4);
+  if (p >= 0.1)    return p.toFixed(5);
+  if (p >= 0.01)   return p.toFixed(6);
+  if (p >= 0.0001) return p.toFixed(7);
+  // Sub-0.0001 tokens (PEPE, SHIB, FLOKI, etc.)
+  // Trim trailing zeros but keep at least 2 significant digits
+  const s = p.toFixed(10);
+  const match = s.match(/^0\.(0*[1-9]{1,2})/);
+  return match ? '0.' + match[1].padEnd(match[1].length, '0') : p.toExponential(3);
 }
 
 export function fmtK(n: number): string {

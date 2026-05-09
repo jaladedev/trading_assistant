@@ -86,6 +86,7 @@ interface ChartSlice {
 //  Calculator slice
 // ──────────────────────────────────────────────────────────
 interface CalcSlice {
+  activeTab: 'chart' | 'calc' | 'journal';
   currentDir: 'long' | 'short';
   rrRatio: number;
   entryPrice: string;
@@ -176,6 +177,7 @@ const defaultChart: ChartSlice = {
 };
 
 const defaultCalc: CalcSlice = {
+  activeTab: 'chart',
   currentDir: 'long', rrRatio: 2,
   entryPrice: '', stopPrice: '', sizeUsd: '100', tokens: '',
   leverage: 10, feeType: 'maker',
@@ -202,14 +204,16 @@ export const useStore = create<StoreState>()(
       setSym: (sym) => set({ sym }),
       setTf:  (tf)  => set({ tf }),
 
-      resetChartState: () => set({
+      resetChartState: () => set(s => ({
         ...defaultChart,
+        sym: s.sym,   
+        tf:  s.tf,    
         _rsiState: makeRSIState(),
         _prevClose: null,
         _e9: null, _e20: null, _e50: null,
         _vwapState: makeVWAPState(),
         _cvdState: makeCVDState(),
-      }),
+      })),
 
       addCandleToState: (c) => {
         const s = get();
@@ -357,6 +361,7 @@ export const useStore = create<StoreState>()(
         if (!suggestion) return;
         const d = suggestion.entry > 100 ? 2 : 4;
         set({
+          activeTab:  'calc',
           currentDir: suggestion.dir,
           entryPrice: suggestion.entry.toFixed(d),
           stopPrice:  suggestion.stop.toFixed(d),
