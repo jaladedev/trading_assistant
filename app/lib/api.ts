@@ -5,6 +5,13 @@ const CG_MAP: Record<string, string> = {
   XRPUSDT: 'ripple',  TONUSDT: 'the-open-network', BNBUSDT: 'binancecoin',
 };
 
+// Bybit uses different interval strings than Binance
+const BYBIT_TF: Record<string, string> = {
+  '1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30',
+  '1h': '60', '2h': '120', '4h': '240', '6h': '360', '12h': '720',
+  '1d': 'D', '1w': 'W', '1M': 'M',
+};
+
 interface ApiDef {
   name: string;
   klines: (sym: string, tf: string) => string;
@@ -17,15 +24,47 @@ const APIS: ApiDef[] = [
   {
     name: 'Binance',
     klines: (s, t) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
-    ticker: (s) => `https://api.binance.com/api/v3/ticker/price?symbol=${s}`,
-    parseKlines: (d) => (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
+    ticker: (s) =>    `https://api.binance.com/api/v3/ticker/price?symbol=${s}`,
+    parseKlines: (d) =>
+      (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
     parseTicker: (d) => +(d as { price: string }).price,
+  },
+  {
+    name: 'Bybit',
+    // Bybit V5 market klines — category=spot for spot pairs
+    klines: (s, t) => {
+      const interval = BYBIT_TF[t] ?? '5';
+      return `https://api.bybit.com/v5/market/kline?category=spot&symbol=${s}&interval=${interval}&limit=100`;
+    },
+    ticker: (s) =>
+      `https://api.bybit.com/v5/market/tickers?category=spot&symbol=${s}`,
+    parseKlines: (d) => {
+      // Bybit returns { result: { list: [ [startTime, open, high, low, close, volume, turnover], ... ] } }
+      // List is newest-first, so reverse to get chronological order.
+      const list = (d as { result: { list: string[][] } }).result?.list ?? [];
+      return list
+        .slice()
+        .reverse()
+        .map(k => ({
+          t: +k[0],
+          o: +k[1],
+          h: +k[2],
+          l: +k[3],
+          c: +k[4],
+          v: +k[5],
+        }));
+    },
+    parseTicker: (d) => {
+      const list = (d as { result: { list: { lastPrice: string }[] } }).result?.list ?? [];
+      return list.length > 0 ? +list[0].lastPrice : 0;
+    },
   },
   {
     name: 'Binance US',
     klines: (s, t) => `https://api.binance.us/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
-    ticker: (s) => `https://api.binance.us/api/v3/ticker/price?symbol=${s}`,
-    parseKlines: (d) => (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
+    ticker: (s) =>    `https://api.binance.us/api/v3/ticker/price?symbol=${s}`,
+    parseKlines: (d) =>
+      (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
     parseTicker: (d) => +(d as { price: string }).price,
   },
   {
@@ -69,7 +108,10 @@ export async function fetchKlines(symbol: string, timeframe: string): Promise<Ca
     try {
       const data = await tryFetch(api.klines(symbol, timeframe));
       activeApiIdx = (activeApiIdx + i) % APIS.length;
-      return api.parseKlines(data);
+      const candles = api.parseKlines(data);
+      // Sanity check: reject empty or obviously bad responses
+      if (candles.length === 0 || candles.some(c => isNaN(c.c) || c.c <= 0)) throw new Error('bad data');
+      return candles;
     } catch { /* try next */ }
   }
   return null;
