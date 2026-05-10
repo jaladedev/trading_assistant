@@ -12,6 +12,13 @@ const BYBIT_TF: Record<string, string> = {
   '1d': 'D', '1w': 'W', '1M': 'M',
 };
 
+// OKX uses different bar strings than Binance
+const OKX_TF: Record<string, string> = {
+  '1m': '1m', '3m': '3m', '5m': '5m', '15m': '15m', '30m': '30m',
+  '1h': '1H', '2h': '2H', '4h': '4H', '6h': '6H', '12h': '12H',
+  '1d': '1D', '1w': '1W', '1M': '1M',
+};
+
 interface ApiDef {
   name: string;
   klines: (sym: string, tf: string) => string;
@@ -58,6 +65,48 @@ const APIS: ApiDef[] = [
       const list = (d as { result: { list: { lastPrice: string }[] } }).result?.list ?? [];
       return list.length > 0 ? +list[0].lastPrice : 0;
     },
+  },
+  {
+    name: 'OKX',
+    // OKX uses instId format with a hyphen: BTC-USDT instead of BTCUSDT
+    klines: (s, t) => {
+      const instId = s.replace(/^([A-Z]+)(USDT)$/, '$1-USDT');
+      const bar = OKX_TF[t] ?? '5m';
+      return `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=100`;
+    },
+    ticker: (s) => {
+      const instId = s.replace(/^([A-Z]+)(USDT)$/, '$1-USDT');
+      return `https://www.okx.com/api/v5/market/ticker?instId=${instId}`;
+    },
+    parseKlines: (d) => {
+      // OKX returns { data: [ [ts, open, high, low, close, vol, volCcy, volCcyQuote, confirm], ... ] }
+      // List is newest-first, so reverse to get chronological order.
+      const list = (d as { data: string[][] }).data ?? [];
+      return list
+        .slice()
+        .reverse()
+        .map(k => ({
+          t: +k[0],
+          o: +k[1],
+          h: +k[2],
+          l: +k[3],
+          c: +k[4],
+          v: +k[5],
+        }));
+    },
+    parseTicker: (d) => {
+      const list = (d as { data: { last: string }[] }).data ?? [];
+      return list.length > 0 ? +list[0].last : 0;
+    },
+  },
+  {
+    name: 'MEXC',
+    klines: (s, t) => `https://api.mexc.com/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
+    ticker: (s) =>    `https://api.mexc.com/api/v3/ticker/price?symbol=${s}`,
+    parseKlines: (d) =>
+      // MEXC kline format mirrors Binance: [openTime, open, high, low, close, volume, ...]
+      (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
+    parseTicker: (d) => +(d as { price: string }).price,
   },
   {
     name: 'Binance US',

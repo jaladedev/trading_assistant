@@ -30,7 +30,7 @@ const ALL_SYMS = [
 ];
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
-type Tab = 'chart' | 'calc' | 'journal';
+type Tab = 'chart' | 'calc' | 'journal' | 'strategy';
 
 const STATUS_COLOR: Record<string, string> = {
   idle: '#6b7591',
@@ -245,6 +245,7 @@ export default function Home() {
     chart:   '📈 Chart',
     calc:    '🧮 Calculator',
     journal: '📓 Journal',
+    strategy: '⚡ Strategy',
   };
 
   return (
@@ -320,7 +321,7 @@ export default function Home() {
         display: 'flex', gap: 2, padding: '8px 16px',
         borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
       }}>
-        {(['chart', 'calc', 'journal'] as Tab[]).map(t => (
+        {(['chart', 'calc', 'journal', 'strategy'] as Tab[]).map(t => (
           <button
             key={t}
             style={tabStyle(activeTab === t)}
@@ -335,7 +336,7 @@ export default function Home() {
           marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
           fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)',
         }}>
-          {[['C', 'chart'], ['K', 'calc'], ['J', 'journal'], ['1-6', 'tf']].map(([key, label]) => (
+          {[['C', 'chart'], ['K', 'calc'], ['J', 'journal'], ['S', 'strategy'], ['1-6', 'tf']].map(([key, label]) => (
             <span key={key} style={{
               padding: '1px 5px', borderRadius: 3,
               border: '1px solid var(--border2)', background: 'var(--bg3)',

@@ -176,7 +176,7 @@ interface ChartSlice {
 }
 
 interface CalcSlice {
-  activeTab:   'chart' | 'calc' | 'journal';
+  activeTab:   'chart' | 'calc' | 'journal' | 'strategy';
   currentDir:  'long' | 'short';
   rrRatio:     number;
   entryPrice:  string;
@@ -224,7 +224,7 @@ interface Actions {
   setIndicatorParam:    (key: keyof IndicatorParams, value: number) => void;
   resetIndicatorParams: () => void;
   // Calculator
-  setActiveTab:         (tab: 'chart' | 'calc' | 'journal') => void;
+  setActiveTab:         (tab: 'chart' | 'calc' | 'journal' | 'strategy') => void;
   setCurrentDir:        (dir: 'long' | 'short') => void;
   setRrRatio:           (r: number) => void;
   setEntryPrice:        (v: string) => void;
