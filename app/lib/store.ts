@@ -27,6 +27,7 @@ import {
 } from './indicators';
 import { calcAutoFibo, fiboEntryScore } from './indicators2';
 import type { Drawing } from './drawingTools';
+import type { BacktestResult } from './backtestTypes';
 
 // ──────────────────────────────────────────────────────────
 //  Types
@@ -61,15 +62,30 @@ export interface TradeJournalEntry {
   notes:   string;
 }
 
-// ── Feature 15: Partial TPs ───────────────────────────────────────────────────
+// ── PartialTP — shape used by RRCard ─────────────────────────────────────────
+// Fields: ratio (RR multiple), pct (% of position), price, pnlUsd, hit (toggled)
 export interface PartialTP {
-  label:  string;   // 'TP1' | 'TP2' | 'TP3'
-  rrMult: number;   // e.g. 1, 2, 3
-  price:  number;
-  pct:    number;   // % of position to close at this level
+  ratio:   number;   // e.g. 1.5
+  pct:     number;   // % of position to close, e.g. 33
+  price:   number;   // computed
+  pnlUsd:  number;   // computed
+  hit:     boolean;  // user-toggled
 }
 
-// ── Feature 19: Price Alerts ──────────────────────────────────────────────────
+// ── SessionTrade — one logged trade row in SessionPnL card ───────────────────
+export interface SessionTrade {
+  id:     string;
+  time:   number;
+  sym:    string;
+  dir:    'long' | 'short';
+  entry:  number;
+  exit:   number;
+  size:   number;   // $ position size
+  pnl:    number;
+  note?:  string;
+}
+
+// ── PriceAlert ───────────────────────────────────────────────────────────────
 export interface PriceAlert {
   id:        string;
   sym:       string;
@@ -80,36 +96,26 @@ export interface PriceAlert {
   createdAt: number;
 }
 
-// ── Feature 17: Session P&L ───────────────────────────────────────────────────
-export interface SessionPnL {
-  sessionStart:  number;
-  openPrice:     number;
-  unrealisedPct: number;
-  unrealisedUsd: number;
-  peakPct:       number;
-  troughPct:     number;
-}
-
 export interface ActiveIndicators {
-  ema9:        boolean;
-  ema20:       boolean;
-  ema50:       boolean;
-  vwap:        boolean;
-  vwapBands:   boolean;
-  bb:          boolean;
-  superTrend:  boolean;
-  psar:        boolean;
-  macd:        boolean;
-  rsi:         boolean;
-  stochRsi:    boolean;
-  adx:         boolean;
-  obv:         boolean;
-  williamsR:   boolean;
-  cci:         boolean;
-  volume:      boolean;
-  cvd:         boolean;
-  patterns:    boolean;
-  fib:         boolean;
+  ema9:          boolean;
+  ema20:         boolean;
+  ema50:         boolean;
+  vwap:          boolean;
+  vwapBands:     boolean;
+  bb:            boolean;
+  superTrend:    boolean;
+  psar:          boolean;
+  macd:          boolean;
+  rsi:           boolean;
+  stochRsi:      boolean;
+  adx:           boolean;
+  obv:           boolean;
+  williamsR:     boolean;
+  cci:           boolean;
+  volume:        boolean;
+  cvd:           boolean;
+  patterns:      boolean;
+  fib:           boolean;
   volumeProfile: boolean;
 }
 
@@ -144,60 +150,73 @@ interface StrategySlice {
 }
 
 interface ChartSlice {
-  sym:           string;
-  tf:            string;
-  candles:       Candle[];
-  e9s:           (number | null)[];
-  e20s:          (number | null)[];
-  e50s:          (number | null)[];
-  e9:            number | null;
-  e20:           number | null;
-  e50:           number | null;
-  rsiVals:       (number | null)[];
-  stochRsiK:     (number | null)[];
-  stochRsiD:     (number | null)[];
-  macdLine:      (number | null)[];
-  macdSignal:    (number | null)[];
-  macdHist:      (number | null)[];
-  bbUpper:       (number | null)[];
-  bbMiddle:      (number | null)[];
-  bbLower:       (number | null)[];
-  bbWidth:       (number | null)[];
-  bbPct:         (number | null)[];
-  atrVals:       (number | null)[];
-  stVals:        (number | null)[];
-  stBull:        boolean[];
-  adxVals:       (number | null)[];
-  plusDI:        (number | null)[];
-  minusDI:       (number | null)[];
-  obvVals:       number[];
-  willRVals:     (number | null)[];
-  cciVals:       (number | null)[];
-  psarVals:      (number | null)[];
-  psarBull:      boolean[];
-  vwapVals:      (number | null)[];
-  vwapUpper1:    (number | null)[];
-  vwapLower1:    (number | null)[];
-  vwapUpper2:    (number | null)[];
-  vwapLower2:    (number | null)[];
-  cvdBarDeltas:  number[];
-  cvdCumDeltas:  number[];
-  patterns:      PatternResult[][];
-  crossovers:    CrossoverEvent[];
-  livePrice:     number;
-  prevLivePrice: number;
-  openPrice:     number;
-  currentCandle: Candle | null;
+  sym:            string;
+  tf:             string;
+  candles:        Candle[];
+  e9s:            (number | null)[];
+  e20s:           (number | null)[];
+  e50s:           (number | null)[];
+  e9:             number | null;
+  e20:            number | null;
+  e50:            number | null;
+  rsiVals:        (number | null)[];
+  stochRsiK:      (number | null)[];
+  stochRsiD:      (number | null)[];
+  macdLine:       (number | null)[];
+  macdSignal:     (number | null)[];
+  macdHist:       (number | null)[];
+  bbUpper:        (number | null)[];
+  bbMiddle:       (number | null)[];
+  bbLower:        (number | null)[];
+  bbWidth:        (number | null)[];
+  bbPct:          (number | null)[];
+  atrVals:        (number | null)[];
+  stVals:         (number | null)[];
+  stBull:         boolean[];
+  adxVals:        (number | null)[];
+  plusDI:         (number | null)[];
+  minusDI:        (number | null)[];
+  obvVals:        number[];
+  willRVals:      (number | null)[];
+  cciVals:        (number | null)[];
+  psarVals:       (number | null)[];
+  psarBull:       boolean[];
+  vwapVals:       (number | null)[];
+  vwapUpper1:     (number | null)[];
+  vwapLower1:     (number | null)[];
+  vwapUpper2:     (number | null)[];
+  vwapLower2:     (number | null)[];
+  cvdBarDeltas:   number[];
+  cvdCumDeltas:   number[];
+  patterns:       PatternResult[][];
+  crossovers:     CrossoverEvent[];
+  livePrice:      number;
+  prevLivePrice:  number;
+  openPrice:      number;
+  currentCandle:  Candle | null;
   lastCandleTime: number;
-  connStatus:    ConnStatus;
-  connLabel:     string;
-  suggestion:    Suggestion | null;
-  entryQuality:  EntryQuality | null;
-  partialTPs:          PartialTP[];
-  atrTrailingStop:     number | null;
-  sessionPnL:          SessionPnL | null;
-  dailyLossBreached:   boolean;
-  priceAlerts:         PriceAlert[];
+  connStatus:     ConnStatus;
+  connLabel:      string;
+  suggestion:     Suggestion | null;
+  entryQuality:   EntryQuality | null;
+
+  // Partial TPs (RRCard shape)
+  partialTPs:         PartialTP[];
+  // ATR trailing stop
+  atrTrailActive:     boolean;          // RRCard toggles this
+  trailingStopPrice:  number | null;    // live-computed;
+  // Session trades (SessionPnL shape)
+  sessionTrades:      SessionTrade[];
+  sessionPnL:         number;           // net $ P&L (sum of trades)
+  // Daily loss
+  maxDailyLossUsd:    number;           // absolute $ limit (replaces pct)
+  dailyLossBannerDismissed: boolean;    // replaces dailyLossBreached
+  // Price alerts
+  priceAlerts:        PriceAlert[];
+  // Backtest
+  backtestResult:     BacktestResult | null;
+  backtestRunning:    boolean;
+
   _rsiState:    RSIState;
   _prevClose:   number | null;
   _e9:          number | null;
@@ -217,18 +236,18 @@ interface ChartSlice {
 }
 
 interface CalcSlice {
-  activeTab:   'chart' | 'calc' | 'journal' | 'strategy';
-  currentDir:  'long' | 'short';
-  rrRatio:     number;
-  entryPrice:  string;
-  stopPrice:   string;
-  sizeUsd:     string;
-  tokens:      string;
-  leverage:    number;
-  feeType:     'maker' | 'taker';
-  capital:     string;
-  goalPct:     string;
-  margin:      string;
+  activeTab:  'chart' | 'calc' | 'journal' | 'strategy';
+  currentDir: 'long' | 'short';
+  rrRatio:    number;
+  entryPrice: string;
+  stopPrice:  string;
+  sizeUsd:    string;
+  tokens:     string;
+  leverage:   number;
+  feeType:    'maker' | 'taker';
+  capital:    string;
+  goalPct:    string;
+  margin:     string;
 }
 
 interface JournalSlice {
@@ -246,13 +265,9 @@ interface SettingsSlice {
   activeIndicators: ActiveIndicators;
   indicatorParams:  IndicatorParams;
   chartDrawings:    Drawing[];
-  // Feature 16
   atrTrailMult:     number;
-  // Feature 18
-  maxDailyLossPct:  number;
-  // Feature 15
-  tpPartials:       [number, number, number];
-  tpPartialPcts:    [number, number, number];
+  soundEnabled:     boolean;
+  notifEnabled:     boolean;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -293,19 +308,28 @@ interface Actions {
   setActiveStrategy:    (id: string | null) => void;
   evalActiveStrategy:   () => void;
   setChartDrawings:     (d: Drawing[]) => void;
-  // Feature 15
-  setTpPartials:        (rrs: [number,number,number], pcts: [number,number,number]) => void;
-  // Feature 16
+  // Partial TPs (RRCard API)
+  setPartialTPs:        (tps: PartialTP[]) => void;
+  toggleTPHit:          (idx: number) => void;
+  // ATR trailing stop (RRCard API)
   setAtrTrailMult:      (v: number) => void;
-  // Feature 17
-  initSession:          () => void;
-  // Feature 18
-  setMaxDailyLoss:      (pct: number) => void;
-  dismissDailyLossBanner: () => void;
-  // Feature 19
+  setAtrTrailActive:    (v: boolean) => void;
+  // Session trades (SessionPnL API)
+  addSessionTrade:      (t: Omit<SessionTrade, 'id' | 'time'>) => void;
+  clearSessionTrades:   () => void;
+  // Daily loss (SessionPnL API)
+  setMaxDailyLossUsd:   (v: number) => void;
+  setDailyLossBannerDismissed: (v: boolean) => void;
+  // Price alerts
   addPriceAlert:        (a: Omit<PriceAlert, 'id' | 'triggered' | 'createdAt'>) => void;
   removePriceAlert:     (id: string) => void;
   clearTriggeredAlerts: () => void;
+  // Sound / notifications
+  setSoundEnabled:      (v: boolean) => void;
+  setNotifEnabled:      (v: boolean) => void;
+  // Backtest (BacktestPanel API)
+  setBacktestResult:    (r: BacktestResult | null) => void;
+  setBacktestRunning:   (v: boolean) => void;
 }
 
 type StoreState = ChartSlice & CalcSlice & JournalSlice & SettingsSlice & StrategySlice & Actions;
@@ -353,12 +377,16 @@ function makeDefaultChartSlice(): ChartSlice {
     currentCandle: null, lastCandleTime: 0,
     connStatus: 'idle', connLabel: 'Connecting…',
     suggestion: null, entryQuality: null,
-    // Feature 15-19
-    partialTPs:        [],
-    atrTrailingStop:   null,
-    sessionPnL:        null,
-    dailyLossBreached: false,
-    priceAlerts:       [],
+    partialTPs:               [],
+    atrTrailActive:           false,
+    trailingStopPrice:        null,
+    sessionTrades:            [],
+    sessionPnL:               0,
+    maxDailyLossUsd:          0,
+    dailyLossBannerDismissed: false,
+    priceAlerts:              [],
+    backtestResult:           null,
+    backtestRunning:          false,
     _rsiState:  makeRSIState(), _prevClose: null,
     _e9: null, _e20: null, _e50: null,
     _macdState:  makeMACDState(),
@@ -392,9 +420,8 @@ const defaultSettings: SettingsSlice = {
   indicatorParams:  defaultIndicatorParams,
   chartDrawings:    [],
   atrTrailMult:     2.5,
-  maxDailyLossPct:  2,
-  tpPartials:       [1, 2, 3],
-  tpPartialPcts:    [33, 33, 34],
+  soundEnabled:     true,
+  notifEnabled:     false,
 };
 
 const defaultStrategy: StrategySlice = {
@@ -403,25 +430,9 @@ const defaultStrategy: StrategySlice = {
   strategySignal:   null,
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/** Compute partial TP prices from suggestion + RR multiples */
-function computePartialTPs(
-  suggestion: Suggestion | null,
-  rrs:  [number, number, number],
-  pcts: [number, number, number],
-): PartialTP[] {
-  if (!suggestion) return [];
-  const risk = Math.abs(suggestion.entry - suggestion.stop);
-  return rrs.map((mult, i) => {
-    const price = suggestion.dir === 'long'
-      ? suggestion.entry + risk * mult
-      : suggestion.entry - risk * mult;
-    return { label: `TP${i + 1}`, rrMult: mult, price, pct: pcts[i] };
-  });
-}
-
-/** Compute ATR trailing stop */
+// ──────────────────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────────────────
 function computeAtrTrail(
   livePrice: number,
   suggestion: Suggestion | null,
@@ -429,14 +440,13 @@ function computeAtrTrail(
   mult: number,
 ): number | null {
   if (!suggestion || !livePrice) return null;
-  const atr = atrVals.filter(v => v != null).slice(-1)[0];
+  const atr = (atrVals.filter(v => v != null) as number[]).slice(-1)[0];
   if (!atr) return null;
   return suggestion.dir === 'long'
     ? livePrice - atr * mult
     : livePrice + atr * mult;
 }
 
-/** Fire browser notification (no-op if permission denied) */
 function fireNotification(title: string, body: string) {
   if (typeof window === 'undefined') return;
   if (Notification.permission === 'granted') {
@@ -446,6 +456,35 @@ function fireNotification(title: string, body: string) {
       if (p === 'granted') new Notification(title, { body, icon: '/favicon.ico' });
     });
   }
+}
+
+export function playAlertSound(type: 'alert' | 'crossover' = 'alert') {
+  if (typeof window === 'undefined') return;
+  try {
+    const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    if (type === 'crossover') {
+      osc.frequency.setValueAtTime(880,  ctx.currentTime);
+      osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.12);
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.35);
+    } else {
+      osc.frequency.setValueAtTime(660, ctx.currentTime);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.08);
+      osc.frequency.setValueAtTime(660, ctx.currentTime + 0.16);
+      gain.gain.setValueAtTime(0.22, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.4);
+    }
+    osc.onended = () => ctx.close();
+  } catch { /* AudioContext unavailable */ }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -473,12 +512,11 @@ export const useStore = create<StoreState>()(
       })),
 
       addCandleToState: (c) => {
-        const s  = get();
-        const p  = s.indicatorParams;
+        const s    = get();
+        const p    = s.indicatorParams;
         const prev = s.candles[s.candles.length - 1] ?? null;
 
         const prevE9  = s._e9;
-        const prevE20 = s._e20;
         const newE9   = updEMA(s._e9,  c.c, emaK(p.ema9Period));
         const newE20  = updEMA(s._e20, c.c, emaK(p.ema20Period));
         const newE50  = updEMA(s._e50, c.c, emaK(p.ema50Period));
@@ -488,20 +526,20 @@ export const useStore = create<StoreState>()(
 
         const macdState = { ...s._macdState };
         const { macdLine, signalLine: macdSig, histogram: macdH } = calcMACD(
-          c.c, macdState, p.macdFast, p.macdSlow, p.macdSignal
+          c.c, macdState, p.macdFast, p.macdSlow, p.macdSignal,
         );
 
         const bbState = { closes: [...s._bbState.closes] };
         const { upper: bbU, middle: bbM, lower: bbL, width: bbW, pct: bbP } = calcBB(
-          c.c, bbState, p.bbPeriod, p.bbStdDev
+          c.c, bbState, p.bbPeriod, p.bbStdDev,
         );
 
         const atrState = { prevClose: s._atrState.prevClose, atr: s._atrState.atr, seed: [...s._atrState.seed] };
-        const atrVal = calcATR(c, atrState, p.atrPeriod);
+        const atrVal   = calcATR(c, atrState, p.atrPeriod);
 
         const stState: SuperTrendState = {
-          atrState:  { prevClose: s._stState.atrState.prevClose, atr: s._stState.atrState.atr, seed: [...s._stState.atrState.seed] },
-          upperBand: s._stState.upperBand, lowerBand: s._stState.lowerBand,
+          atrState:   { prevClose: s._stState.atrState.prevClose, atr: s._stState.atrState.atr, seed: [...s._stState.atrState.seed] },
+          upperBand:  s._stState.upperBand, lowerBand: s._stState.lowerBand,
           superTrend: s._stState.superTrend, direction: s._stState.direction,
         };
         const { value: stVal, bull: stB } = calcSuperTrend(c, stState, p.stPeriod, p.stMultiplier);
@@ -515,63 +553,65 @@ export const useStore = create<StoreState>()(
         };
         const { adx: adxVal, plusDI: pDI, minusDI: mDI } = calcADX(c, adxState, p.adxPeriod);
 
-        const obvState = { ...s._obvState };
-        const obvVal   = calcOBV(c, obvState);
+        const obvState   = { ...s._obvState };
+        const obvVal     = calcOBV(c, obvState);
         const willRState = { highs: [...s._willRState.highs], lows: [...s._willRState.lows] };
         const willRVal   = calcWilliamsR(c, willRState, p.williamsRPeriod);
-        const cciState = { typicals: [...s._cciState.typicals] };
-        const cciVal   = calcCCI(c, cciState, p.cciPeriod);
-        const psarState = { ...s._psarState };
+        const cciState   = { typicals: [...s._cciState.typicals] };
+        const cciVal     = calcCCI(c, cciState, p.cciPeriod);
+        const psarState  = { ...s._psarState };
         const { value: psarVal, bull: psarB } = calcPSAR(c, psarState, p.psarStep, p.psarMax);
-        const vwapState = { ...s._vwapState };
+        const vwapState  = { ...s._vwapState };
         const { vwap: vwapV, upper1: vu1, lower1: vl1, upper2: vu2, lower2: vl2 } = calcVWAP(c, vwapState);
-        const cvdState = { ...s._cvdState };
+        const cvdState   = { ...s._cvdState };
         const { barDelta, cumDelta } = calcCVD(c, cvdState);
         const candlePatterns = detectPatterns(c, prev);
 
+        // EMA crossover detection
         let newCrossovers = [...s.crossovers];
-        if (prevE9 !== null && prevE20 !== null) {
-          const bull = prevE9 <= (s._e20 ?? 0) && newE9 > newE20;
-          const bear = prevE9 >= (s._e20 ?? 0) && newE9 < newE20;
+        if (prevE9 !== null && s._e20 !== null) {
+          const bull = prevE9 <= s._e20 && newE9 > newE20;
+          const bear = prevE9 >= s._e20 && newE9 < newE20;
           if (bull || bear) {
             newCrossovers.push({ type: bull ? 'bull' : 'bear', price: c.c, idx: s.candles.length, time: Date.now() });
             if (newCrossovers.length > 8) newCrossovers.shift();
+            if (s.soundEnabled) playAlertSound('crossover');
           }
         }
 
         const push = <T>(arr: T[], val: T) => [...arr, val];
-        let newCandles    = push(s.candles,      c);
-        let newE9s        = push(s.e9s,          newE9);
-        let newE20s       = push(s.e20s,         newE20);
-        let newE50s       = push(s.e50s,         newE50);
-        let newRsi        = push(s.rsiVals,      rsiVal);
-        let newMacdLine   = push(s.macdLine,     macdLine);
-        let newMacdSig    = push(s.macdSignal,   macdSig);
-        let newMacdHist   = push(s.macdHist,     macdH);
-        let newBbUpper    = push(s.bbUpper,      bbU);
-        let newBbMiddle   = push(s.bbMiddle,     bbM);
-        let newBbLower    = push(s.bbLower,      bbL);
-        let newBbWidth    = push(s.bbWidth,      bbW);
-        let newBbPct      = push(s.bbPct,        bbP);
-        let newAtr        = push(s.atrVals,      atrVal);
-        let newStVals     = push(s.stVals,       stVal);
-        let newStBull     = push(s.stBull,       stB);
-        let newAdx        = push(s.adxVals,      adxVal);
-        let newPlusDI     = push(s.plusDI,       pDI);
-        let newMinusDI    = push(s.minusDI,      mDI);
-        let newObv        = push(s.obvVals,      obvVal);
-        let newWillR      = push(s.willRVals,    willRVal);
-        let newCci        = push(s.cciVals,      cciVal);
-        let newPsarVals   = push(s.psarVals,     psarVal);
-        let newPsarBull   = push(s.psarBull,     psarB);
-        let newVwap       = push(s.vwapVals,     vwapV);
-        let newVwapU1     = push(s.vwapUpper1,   vu1);
-        let newVwapL1     = push(s.vwapLower1,   vl1);
-        let newVwapU2     = push(s.vwapUpper2,   vu2);
-        let newVwapL2     = push(s.vwapLower2,   vl2);
-        let newCvdBar     = push(s.cvdBarDeltas, barDelta);
-        let newCvdCum     = push(s.cvdCumDeltas, cumDelta);
-        let newPatterns   = push(s.patterns,     candlePatterns);
+        let newCandles  = push(s.candles,      c);
+        let newE9s      = push(s.e9s,          newE9);
+        let newE20s     = push(s.e20s,         newE20);
+        let newE50s     = push(s.e50s,         newE50);
+        let newRsi      = push(s.rsiVals,      rsiVal);
+        let newMacdLine = push(s.macdLine,     macdLine);
+        let newMacdSig  = push(s.macdSignal,   macdSig);
+        let newMacdHist = push(s.macdHist,     macdH);
+        let newBbUpper  = push(s.bbUpper,      bbU);
+        let newBbMiddle = push(s.bbMiddle,     bbM);
+        let newBbLower  = push(s.bbLower,      bbL);
+        let newBbWidth  = push(s.bbWidth,      bbW);
+        let newBbPct    = push(s.bbPct,        bbP);
+        let newAtr      = push(s.atrVals,      atrVal);
+        let newStVals   = push(s.stVals,       stVal);
+        let newStBull   = push(s.stBull,       stB);
+        let newAdx      = push(s.adxVals,      adxVal);
+        let newPlusDI   = push(s.plusDI,       pDI);
+        let newMinusDI  = push(s.minusDI,      mDI);
+        let newObv      = push(s.obvVals,      obvVal);
+        let newWillR    = push(s.willRVals,    willRVal);
+        let newCci      = push(s.cciVals,      cciVal);
+        let newPsarVals = push(s.psarVals,     psarVal);
+        let newPsarBull = push(s.psarBull,     psarB);
+        let newVwap     = push(s.vwapVals,     vwapV);
+        let newVwapU1   = push(s.vwapUpper1,   vu1);
+        let newVwapL1   = push(s.vwapLower1,   vl1);
+        let newVwapU2   = push(s.vwapUpper2,   vu2);
+        let newVwapL2   = push(s.vwapLower2,   vl2);
+        let newCvdBar   = push(s.cvdBarDeltas, barDelta);
+        let newCvdCum   = push(s.cvdCumDeltas, cumDelta);
+        let newPatterns = push(s.patterns,     candlePatterns);
 
         const rsiWindow = newRsi.slice(-50);
         const srPeriod  = p.stochRsiPeriod;
@@ -593,16 +633,16 @@ export const useStore = create<StoreState>()(
         let newStochD = push(s.stochRsiD, smoothD[smoothD.length - 1] ?? null);
 
         if (newCandles.length > 200) {
-          newCandles.shift();   newE9s.shift();     newE20s.shift();    newE50s.shift();
-          newRsi.shift();       newMacdLine.shift(); newMacdSig.shift(); newMacdHist.shift();
-          newBbUpper.shift();   newBbMiddle.shift(); newBbLower.shift(); newBbWidth.shift(); newBbPct.shift();
-          newAtr.shift();       newStVals.shift();   newStBull.shift();
-          newAdx.shift();       newPlusDI.shift();   newMinusDI.shift();
-          newObv.shift();       newWillR.shift();    newCci.shift();
+          newCandles.shift();   newE9s.shift();      newE20s.shift();    newE50s.shift();
+          newRsi.shift();       newMacdLine.shift();  newMacdSig.shift(); newMacdHist.shift();
+          newBbUpper.shift();   newBbMiddle.shift();  newBbLower.shift(); newBbWidth.shift(); newBbPct.shift();
+          newAtr.shift();       newStVals.shift();    newStBull.shift();
+          newAdx.shift();       newPlusDI.shift();    newMinusDI.shift();
+          newObv.shift();       newWillR.shift();     newCci.shift();
           newPsarVals.shift();  newPsarBull.shift();
-          newVwap.shift();      newVwapU1.shift();   newVwapL1.shift(); newVwapU2.shift(); newVwapL2.shift();
+          newVwap.shift();      newVwapU1.shift();    newVwapL1.shift(); newVwapU2.shift(); newVwapL2.shift();
           newCvdBar.shift();    newCvdCum.shift();
-          newPatterns.shift();  newStochK.shift();   newStochD.shift();
+          newPatterns.shift();  newStochK.shift();    newStochD.shift();
           newCrossovers = newCrossovers.map(x => ({ ...x, idx: x.idx - 1 })).filter(x => x.idx >= 0);
         }
 
@@ -634,17 +674,17 @@ export const useStore = create<StoreState>()(
       },
 
       setLivePrice: (price, _apiName) => {
-        const s   = get();
-        const tf  = s.tf;
+        const s    = get();
+        const tf   = s.tf;
         const prev = s.livePrice;
-        let cur   = s.currentCandle;
-        const now = Date.now();
+        let cur    = s.currentCandle;
+        const now  = Date.now();
 
         if (!cur) {
           cur = { o: price, h: price, l: price, c: price, v: 500, t: now };
           set({ currentCandle: cur, lastCandleTime: now, livePrice: price, prevLivePrice: prev });
         } else {
-          const updated: Candle = {
+          const updated = {
             ...cur, c: price,
             h: Math.max(cur.h, price),
             l: Math.min(cur.l, price),
@@ -664,37 +704,28 @@ export const useStore = create<StoreState>()(
           set({ currentCandle: { o: price, h: price, l: price, c: price, v: 500, t: now }, lastCandleTime: now });
         }
 
-        // ── Feature 17: update session P&L ──────────────────────────────────
-        const sess = get().sessionPnL;
-        if (sess && sess.openPrice > 0) {
-          const unrealisedPct = (price - sess.openPrice) / sess.openPrice * 100;
-          const cap = parseFloat(get().capital) || 200;
-          const unrealisedUsd = unrealisedPct * cap / 100;
-          const updatedSess: SessionPnL = {
-            ...sess,
-            unrealisedPct,
-            unrealisedUsd,
-            peakPct:   Math.max(sess.peakPct,   unrealisedPct),
-            troughPct: Math.min(sess.troughPct, unrealisedPct),
-          };
-          // ── Feature 18: daily loss check ──────────────────────────────────
-          const maxLoss = -(get().maxDailyLossPct);
-          const breached = unrealisedPct <= maxLoss;
-          set({ sessionPnL: updatedSess, dailyLossBreached: breached });
+        // Daily loss check against sessionPnL (absolute $)
+        const netPnL = get().sessionPnL;
+        const maxLoss = get().maxDailyLossUsd;
+        if (maxLoss > 0 && -netPnL >= maxLoss) {
+          // Banner is shown by SessionPnL component; don't auto-dismiss here
         }
 
-        // ── Feature 19: check price alerts ────────────────────────────────
+        // Price alerts
         const alerts = get().priceAlerts;
         if (alerts.length) {
-          const sym = get().sym;
+          const sym     = get().sym;
           const updated = alerts.map(a => {
             if (a.triggered || a.sym !== sym) return a;
             const hit = a.dir === 'above' ? price >= a.price : price <= a.price;
             if (hit) {
-              fireNotification(
-                `🔔 Price Alert — ${a.sym}`,
-                `${a.label || a.dir} ${a.price.toLocaleString()} triggered at ${price.toLocaleString()}`,
-              );
+              if (get().soundEnabled) playAlertSound('alert');
+              if (get().notifEnabled) {
+                fireNotification(
+                  `🔔 Price Alert — ${a.sym}`,
+                  `${a.label || a.dir} ${a.price.toLocaleString()} triggered at ${price.toLocaleString()}`,
+                );
+              }
               return { ...a, triggered: true };
             }
             return a;
@@ -704,9 +735,21 @@ export const useStore = create<StoreState>()(
           }
         }
 
-        // ── Feature 16: ATR trailing stop ─────────────────────────────────
-        const newTrail = computeAtrTrail(price, get().suggestion, get().atrVals, get().atrTrailMult);
-        set({ atrTrailingStop: newTrail });
+        // ATR trailing stop — only advances in favour (ratchet)
+        const st = get();
+        if (st.atrTrailActive) {
+          const newTrail = computeAtrTrail(price, st.suggestion, st.atrVals, st.atrTrailMult);
+          if (newTrail !== null) {
+            const prev = st.trailingStopPrice;
+            const dir  = st.suggestion?.dir ?? 'long';
+            const ratcheted = prev === null
+              ? newTrail
+              : dir === 'long'
+                ? Math.max(prev, newTrail)
+                : Math.min(prev, newTrail);
+            set({ trailingStopPrice: ratcheted });
+          }
+        }
 
         get().refreshSuggestion();
       },
@@ -716,19 +759,14 @@ export const useStore = create<StoreState>()(
       refreshSuggestion: () => {
         const s = get();
         if (!s.e9 || !s.e20 || !s.e50 || s.candles.length < 20) return;
-        const rsi = s.rsiVals.filter(v => v !== null).slice(-1)[0] ?? 50;
-        const sug = computeSuggestion(s.e9, s.e20, s.e50, s.livePrice, rsi as number, s.candles, s.rrRatio);
-        const fibo      = calcAutoFibo(s.candles, 50);
-        const lastAtr   = s.atrVals.length ? s.atrVals[s.atrVals.length - 1] : null;
+        const rsi   = (s.rsiVals.filter(v => v !== null) as number[]).slice(-1)[0] ?? 50;
+        const sug   = computeSuggestion(s.e9, s.e20, s.e50, s.livePrice, rsi, s.candles, s.rrRatio);
+        const fibo  = calcAutoFibo(s.candles, 50);
+        const lastAtr = s.atrVals.length ? s.atrVals[s.atrVals.length - 1] : null;
         const { bonus } = fiboEntryScore(s.livePrice, fibo, lastAtr);
-        const q         = scoreEntryQuality(sug.dir, rsi as number, s.e9, s.e20, s.e50, s.livePrice, s.crossovers, bonus);
+        const q     = scoreEntryQuality(sug.dir, rsi, s.e9, s.e20, s.e50, s.livePrice, s.crossovers, bonus);
 
-        // Feature 15: recompute partial TPs
-        const tps = computePartialTPs(sug, s.tpPartials, s.tpPartialPcts);
-        // Feature 16: recompute ATR trail
-        const trail = computeAtrTrail(s.livePrice, sug, s.atrVals, s.atrTrailMult);
-
-        set({ suggestion: sug, entryQuality: q, partialTPs: tps, atrTrailingStop: trail });
+        set({ suggestion: sug, entryQuality: q });
         get().evalActiveStrategy();
       },
 
@@ -768,16 +806,18 @@ export const useStore = create<StoreState>()(
         set(s => ({ trades: [...s.trades, { ...t, id }] }));
       },
       updateTrade: (id, updates) => set(s => ({ trades: s.trades.map(t => t.id === id ? { ...t, ...updates } : t) })),
-      deleteTrade: (id) => set(s => ({ trades: s.trades.filter(t => t.id !== id) })),
+      deleteTrade:  (id) => set(s => ({ trades: s.trades.filter(t => t.id !== id) })),
 
       // ── Settings ──────────────────────────────────────────────────────────
       setSettings: (patch) => set(patch),
 
       // ── Strategy ──────────────────────────────────────────────────────────
       addStrategy: (s) => set(st => ({ strategies: [...st.strategies, s] })),
-      updateStrategy: (id, patch) => set(st => ({ strategies: st.strategies.map(s => s.id === id ? { ...s, ...patch } : s) })),
+      updateStrategy: (id, patch) => set(st => ({
+        strategies: st.strategies.map(s => s.id === id ? { ...s, ...patch } : s),
+      })),
       deleteStrategy: (id) => set(st => ({
-        strategies: st.strategies.filter(s => s.id !== id),
+        strategies:       st.strategies.filter(s => s.id !== id),
         activeStrategyId: st.activeStrategyId === id ? 'preset-3ema' : st.activeStrategyId,
         strategySignal:   st.activeStrategyId === id ? null : st.strategySignal,
       })),
@@ -789,85 +829,92 @@ export const useStore = create<StoreState>()(
         const allStrategies = [...PRESET_STRATEGIES, ...strategies];
         const strat = allStrategies.find(s => s.id === activeStrategyId);
         if (!strat) return;
-        const snap = buildSnapshot(st);
-        const recent = candles.slice(-20);
+        const snap       = buildSnapshot(st);
+        const recent     = candles.slice(-20);
         const recentLow  = Math.min(...recent.map(c => c.l));
         const recentHigh = Math.max(...recent.map(c => c.h));
-        const cap = parseFloat(capital) || 200;
-        const signal = evaluateStrategy(strat, snap, cap, recentLow, recentHigh);
+        const cap        = parseFloat(capital) || 200;
+        const signal     = evaluateStrategy(strat, snap, cap, recentLow, recentHigh);
         set({ strategySignal: signal });
       },
 
-      setTpPartials: (rrs, pcts) => {
-        set({ tpPartials: rrs, tpPartialPcts: pcts });
-        const s = get();
-        set({ partialTPs: computePartialTPs(s.suggestion, rrs, pcts) });
-      },
+      // ── Partial TPs (RRCard API) ──────────────────────────────────────────
+      // RRCard manages its own TP computation; store just holds and exposes the array.
+      setPartialTPs: (tps) => set({ partialTPs: tps }),
+      toggleTPHit: (idx) => set(s => ({
+        partialTPs: s.partialTPs.map((t, i) => i === idx ? { ...t, hit: !t.hit } : t),
+      })),
 
+      // ── ATR trailing stop (RRCard API) ────────────────────────────────────
       setAtrTrailMult: (v) => {
         set({ atrTrailMult: v });
-        const s = get();
-        set({ atrTrailingStop: computeAtrTrail(s.livePrice, s.suggestion, s.atrVals, v) });
+        // Reset ratchet when multiplier changes so it recomputes cleanly
+        set({ trailingStopPrice: null });
+      },
+      setAtrTrailActive: (v) => {
+        set({ atrTrailActive: v });
+        if (!v) set({ trailingStopPrice: null });
       },
 
-      initSession: () => {
-        const { livePrice } = get();
-        if (!livePrice) return;
-        set({
-          sessionPnL: {
-            sessionStart:  Date.now(),
-            openPrice:     livePrice,
-            unrealisedPct: 0,
-            unrealisedUsd: 0,
-            peakPct:       0,
-            troughPct:     0,
-          },
-          dailyLossBreached: false,
-        });
-      },
+      // ── Session trades (SessionPnL API) ───────────────────────────────────
+      addSessionTrade: (t) => set(s => {
+        const trade: SessionTrade = { ...t, id: Date.now().toString(36) + Math.random().toString(36).slice(2), time: Date.now() };
+        const trades = [...s.sessionTrades, trade];
+        return { sessionTrades: trades, sessionPnL: trades.reduce((acc, x) => acc + x.pnl, 0) };
+      }),
+      clearSessionTrades: () => set({ sessionTrades: [], sessionPnL: 0, dailyLossBannerDismissed: false }),
 
-      setMaxDailyLoss: (pct) => set({ maxDailyLossPct: pct }),
-      dismissDailyLossBanner: () => set({ dailyLossBreached: false }),
+      // ── Daily loss (SessionPnL API) ───────────────────────────────────────
+      setMaxDailyLossUsd:          (v) => set({ maxDailyLossUsd: v }),
+      setDailyLossBannerDismissed: (v) => set({ dailyLossBannerDismissed: v }),
 
+      // ── Price alerts ──────────────────────────────────────────────────────
       addPriceAlert: (a) => {
-        // Request notification permission when first alert is added
         if (typeof window !== 'undefined' && Notification.permission === 'default') {
           Notification.requestPermission();
         }
         const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
         set(s => ({ priceAlerts: [...s.priceAlerts, { ...a, id, triggered: false, createdAt: Date.now() }] }));
       },
-      removePriceAlert: (id) => set(s => ({ priceAlerts: s.priceAlerts.filter(a => a.id !== id) })),
-      clearTriggeredAlerts: () => set(s => ({ priceAlerts: s.priceAlerts.filter(a => !a.triggered) })),
+      removePriceAlert:     (id) => set(s => ({ priceAlerts: s.priceAlerts.filter(a => a.id !== id) })),
+      clearTriggeredAlerts: ()   => set(s => ({ priceAlerts: s.priceAlerts.filter(a => !a.triggered) })),
+
+      // ── Sound / notifications ─────────────────────────────────────────────
+      setSoundEnabled: (v) => set({ soundEnabled: v }),
+      setNotifEnabled: (v) => set({ notifEnabled: v }),
+
+      // ── Backtest (BacktestPanel API) ──────────────────────────────────────
+      setBacktestResult:  (r) => set({ backtestResult: r }),
+      setBacktestRunning: (v) => set({ backtestRunning: v }),
     }),
     {
       name: 'trading_assistant',
       partialize: (s) => ({
-        trades:           s.trades,
-        theme:            s.theme,
-        defaultSym:       s.defaultSym,
-        defaultTf:        s.defaultTf,
-        defaultLeverage:  s.defaultLeverage,
-        defaultFeeType:   s.defaultFeeType,
-        defaultCapital:   s.defaultCapital,
-        defaultRR:        s.defaultRR,
-        capital:          s.capital,
-        margin:           s.margin,
-        goalPct:          s.goalPct,
-        leverage:         s.leverage,
-        feeType:          s.feeType,
-        rrRatio:          s.rrRatio,
-        activeIndicators: s.activeIndicators,
-        indicatorParams:  s.indicatorParams,
-        strategies:       s.strategies,
-        activeStrategyId: s.activeStrategyId,
-        chartDrawings:    s.chartDrawings,
-        atrTrailMult:     s.atrTrailMult,
-        maxDailyLossPct:  s.maxDailyLossPct,
-        tpPartials:       s.tpPartials,
-        tpPartialPcts:    s.tpPartialPcts,
-        priceAlerts:      s.priceAlerts.filter(a => !a.triggered), // only keep live alerts
+        trades:                   s.trades,
+        theme:                    s.theme,
+        defaultSym:               s.defaultSym,
+        defaultTf:                s.defaultTf,
+        defaultLeverage:          s.defaultLeverage,
+        defaultFeeType:           s.defaultFeeType,
+        defaultCapital:           s.defaultCapital,
+        defaultRR:                s.defaultRR,
+        capital:                  s.capital,
+        margin:                   s.margin,
+        goalPct:                  s.goalPct,
+        leverage:                 s.leverage,
+        feeType:                  s.feeType,
+        rrRatio:                  s.rrRatio,
+        activeIndicators:         s.activeIndicators,
+        indicatorParams:          s.indicatorParams,
+        strategies:               s.strategies,
+        activeStrategyId:         s.activeStrategyId,
+        chartDrawings:            s.chartDrawings,
+        atrTrailMult:             s.atrTrailMult,
+        maxDailyLossUsd:          s.maxDailyLossUsd,
+        soundEnabled:             s.soundEnabled,
+        notifEnabled:             s.notifEnabled,
+        priceAlerts:              s.priceAlerts.filter(a => !a.triggered),
       }),
-    }
-  )
+    },
+  ),
 );

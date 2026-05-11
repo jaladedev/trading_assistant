@@ -1,6 +1,3 @@
-// ── drawingTools.ts  ──────────────────────────────────────────────────────────
-// Types, state helpers, and hit-testing for chart drawing tools.
-
 export type DrawingToolKind =
   | 'hline'       // horizontal line
   | 'trendline'   // two-point diagonal line
