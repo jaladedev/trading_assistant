@@ -76,6 +76,8 @@ export interface ActiveIndicators {
   volume:      boolean;
   cvd:         boolean;
   patterns:    boolean;
+  fib:         boolean;   
+  volumeProfile: boolean; 
 }
 
 export interface IndicatorParams {
@@ -266,6 +268,8 @@ const defaultActiveIndicators: ActiveIndicators = {
   macd: false, rsi: true, stochRsi: false,
   adx: false, obv: false, williamsR: false, cci: false,
   volume: true, cvd: true, patterns: true,
+  fib: true,           
+  volumeProfile: true, 
 };
 
 const defaultIndicatorParams: IndicatorParams = {
