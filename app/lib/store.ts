@@ -21,7 +21,8 @@ import {
   detectPatterns,
   computeSuggestion, scoreEntryQuality,
 } from './indicators';
-
+import { calcAutoFibo, fiboEntryScore } from './indicators2';
+import type { Drawing } from './drawingTools';
 
 // ──────────────────────────────────────────────────────────
 //  Types
@@ -204,6 +205,7 @@ interface SettingsSlice {
   defaultRR:        number;
   activeIndicators: ActiveIndicators;
   indicatorParams:  IndicatorParams;
+  chartDrawings: Drawing[];
 }
 
 // ──────────────────────────────────────────────────────────
@@ -249,6 +251,7 @@ interface Actions {
   deleteStrategy:       (id: string) => void;
   setActiveStrategy:    (id: string | null) => void;
   evalActiveStrategy:   () => void;
+  setChartDrawings: (d: Drawing[]) => void;
 }
 
 type StoreState = ChartSlice & CalcSlice & JournalSlice & SettingsSlice & StrategySlice & Actions;
@@ -326,6 +329,7 @@ const defaultSettings: SettingsSlice = {
   defaultCapital: 200, defaultRR: 2,
   activeIndicators: defaultActiveIndicators,
   indicatorParams:  defaultIndicatorParams,
+  chartDrawings: [],
 };
 
 const defaultStrategy: StrategySlice = {
@@ -345,7 +349,8 @@ export const useStore = create<StoreState>()(
       ...defaultJournal,
       ...defaultSettings,
       ...defaultStrategy,
-
+      // Actions    
+      setChartDrawings: (d) => set({ chartDrawings: d }),
       // ── Chart ──────────────────────────────────────────
       setSym: (sym) => set({ sym }),
       setTf:  (tf)  => set({ tf }),
@@ -613,7 +618,10 @@ export const useStore = create<StoreState>()(
         if (!s.e9 || !s.e20 || !s.e50 || s.candles.length < 20) return;
         const rsi = s.rsiVals.filter(v => v !== null).slice(-1)[0] ?? 50;
         const sug = computeSuggestion(s.e9, s.e20, s.e50, s.livePrice, rsi as number, s.candles, s.rrRatio);
-        const q   = scoreEntryQuality(sug.dir, rsi as number, s.e9, s.e20, s.e50, s.livePrice, s.crossovers);
+        const fibo      = calcAutoFibo(s.candles, 50);
+        const lastAtr   = s.atrVals.length ? s.atrVals[s.atrVals.length - 1] : null;
+        const { bonus } = fiboEntryScore(s.livePrice, fibo, lastAtr);
+        const q         = scoreEntryQuality(sug.dir, rsi as number, s.e9, s.e20, s.e50, s.livePrice, s.crossovers, bonus);
         set({ suggestion: sug, entryQuality: q });
         // Evaluate active strategy after updating suggestion data
         get().evalActiveStrategy();
@@ -728,6 +736,7 @@ export const useStore = create<StoreState>()(
         indicatorParams:  s.indicatorParams,
         strategies:       s.strategies,
         activeStrategyId: s.activeStrategyId,
+        chartDrawings: s.chartDrawings,
       }),
     }
   )

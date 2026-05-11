@@ -1,1100 +1,1160 @@
 'use client';
 
-import { useRef, useEffect, useCallback, useMemo, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useStore } from '@/lib/store';
 import { fmtPrice, fmtK } from '@/lib/indicators';
-import IndicatorPanel from '@/components/chart/IndicatorPanel';
+import { fetchKlines } from '@/lib/api';
+import {
+  calcVolumeProfile,
+  calcAutoFibo,
+  detectRSIDivergence,
+  fiboEntryScore,
+  calcMTFConfluence,
+  FIBO_LEVELS, FIBO_COLORS, FIBO_LABELS,
+  type TFSignal, type VolumeProfile, type FiboOverlay, type DivergenceResult,
+} from '@/lib/indicators2';
+import {
+  type Drawing, type DrawingToolKind, type ActiveDraw,
+  makeHLine, makeTrendLine, makeFibDrawing, makeRect,
+  TOOL_DEFAULTS,
+} from '@/lib/drawingTools';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const DPR = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
-const GC  = 'rgba(255,255,255,0.04)';
-const TC  = 'rgba(255,255,255,0.22)';
+// ── Constants ────────────────────────────────────────────────────────────────
+const PADDING = { top: 28, right: 68, bottom: 22, left: 6 };
+const SUB_H   = 80;
+const VP_W    = 56;   // pixels for volume profile column
 
-const CHART = {
-  visibleCandles:   80,
-  padRight:         68,
-  padLeft:           2,
-  padTop:           12,
-  padBottom:         6,
-  candleWidthRatio:  0.6,
-  pricePadPct:       0.06,
-  gridDivisions:      4,
-} as const;
+const TIMEFRAMES_FOR_MTF = ['15m', '1h', '4h', '1d'];
 
-// Colours
-const COL = {
-  ema9:       '#ff6b35',
-  ema20:      '#4da6ff',
-  ema50:      '#a78bff',
-  vwap:       '#00d4ff',
-  vwapBand1:  'rgba(0,212,255,0.15)',
-  vwapBand2:  'rgba(0,212,255,0.07)',
-  bb:         'rgba(255,184,46,0.7)',
-  bbFill:     'rgba(255,184,46,0.05)',
-  superTrendBull: '#00e5a0',
-  superTrendBear: '#ff3d5a',
-  psar:       '#ffb82e',
-  bull:       '#00e5a0',
-  bear:       '#ff3d5a',
-  macdLine:   '#4da6ff',
-  macdSig:    '#ff6b35',
-  macdBull:   'rgba(0,229,160,0.7)',
-  macdBear:   'rgba(255,61,90,0.7)',
-  rsi:        '#ffb82e',
-  stochK:     '#4da6ff',
-  stochD:     '#ff6b35',
-  adx:        '#a78bff',
-  plusDI:     '#00e5a0',
-  minusDI:    '#ff3d5a',
-  obv:        '#00d4ff',
-  willR:      '#ff6b35',
-  cci:        '#a78bff',
-  cvdLine:    '#e0c0ff',
-  grid:       GC,
-  text:       TC,
-};
-
-// ── Canvas helper ─────────────────────────────────────────────────────────────
-function setupCanvas(el: HTMLCanvasElement, heightPx?: number) {
-  const parent = el.parentElement!;
-  const w = (parent.clientWidth - 20) || 600;
-  const h = heightPx ?? (el.getBoundingClientRect().height || parseInt(el.style.height) || 220);
-  if (el.width !== w * DPR || el.height !== h * DPR) {
-    el.width        = w * DPR;
-    el.height       = h * DPR;
-    el.style.width  = w + 'px';
-    el.style.height = h + 'px';
-  }
-  const ctx = el.getContext('2d')!;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  return { ctx, w, h };
-}
-
-// ── Pane coordinate helper ────────────────────────────────────────────────────
-function makePaneCoords(w: number, h: number, padR = 68, padL = 2, padT = 4, padB = 4, n = 80) {
-  const cW = w - padR - padL;
-  const cH = h - padT - padB;
-  const cw = cW / n;
-  const tx = (i: number) => padL + i * cw + cw / 2;
-  return { cW, cH, cw, padL, padR, padT, padB, tx };
-}
-
-// ── Generic oscillator pane (RSI / Stoch / Williams / CCI style) ──────────────
-function drawOscillatorPane(
-  ctx: CanvasRenderingContext2D, w: number, h: number,
-  series: (number | null)[], color: string,
-  lo: number, hi: number,
-  levels: Array<{ v: number; col?: string; dash?: boolean }>,
-  n: number,
-  series2?: { vals: (number | null)[]; color: string },
-) {
-  const { cW, cH, cw, padL, padT, padB } = makePaneCoords(w, h, 68, 2, 4, 4, n);
-  const range = hi - lo || 1;
-  const ty = (v: number) => padT + (1 - (v - lo) / range) * cH;
-  const startI = n - series.length;
-
-  // Level lines
-  levels.forEach(lv => {
-    ctx.strokeStyle = lv.col ?? GC;
-    ctx.lineWidth = 0.5;
-    if (lv.dash) ctx.setLineDash([3, 3]); else ctx.setLineDash([]);
-    ctx.beginPath(); ctx.moveTo(padL, ty(lv.v)); ctx.lineTo(padL + cW, ty(lv.v)); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = TC; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-    ctx.fillText(String(lv.v), padL + cW + 4, ty(lv.v) + 3.5);
-  });
-
-  // Main series
-  const pts = series
-    .map((v, i) => v != null ? { x: padL + (startI + i) * cw + cw / 2, y: ty(v) } : null)
-    .filter(Boolean) as { x: number; y: number }[];
-
-  if (pts.length > 1) {
-    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
-    ctx.beginPath();
-    pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-    ctx.stroke();
-  }
-
-  // Optional second series (e.g. Stoch D)
-  if (series2) {
-    const pts2 = series2.vals
-      .map((v, i) => v != null ? { x: padL + (startI + i) * cw + cw / 2, y: ty(v) } : null)
-      .filter(Boolean) as { x: number; y: number }[];
-    if (pts2.length > 1) {
-      ctx.strokeStyle = series2.color; ctx.lineWidth = 1; ctx.lineJoin = 'round';
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      pts2.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
-      ctx.stroke();
-      ctx.setLineDash([]);
+// ─────────────────────────────────────────────────────────────────────────────
+function hexAlpha(hex: string, a: number) {
+  // Convert any CSS colour string to rgba — fallback pass-through
+  try {
+    if (hex.startsWith('rgba')) return hex;
+    if (hex.startsWith('#')) {
+      const n = parseInt(hex.slice(1), 16);
+      const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      return `rgba(${r},${g},${b},${a})`;
     }
-  }
+  } catch { /* */ }
+  return hex;
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 export default function CandleChart() {
-  const [showPanel, setShowPanel] = useState(false);
-
-  // Canvas refs
-  const priceRef   = useRef<HTMLCanvasElement>(null);
-  const overlayRef = useRef<HTMLCanvasElement>(null);
-  const macdRef    = useRef<HTMLCanvasElement>(null);
-  const rsiRef     = useRef<HTMLCanvasElement>(null);
-  const stochRef   = useRef<HTMLCanvasElement>(null);
-  const adxRef     = useRef<HTMLCanvasElement>(null);
-  const willRRef   = useRef<HTMLCanvasElement>(null);
-  const cciRef     = useRef<HTMLCanvasElement>(null);
-  const volRef     = useRef<HTMLCanvasElement>(null);
-  const obvRef     = useRef<HTMLCanvasElement>(null);
-  const cvdRef     = useRef<HTMLCanvasElement>(null);
-  const ttRef      = useRef<HTMLDivElement>(null);
-  const hoverIdx   = useRef(-1);
-
   const {
-    candles, currentCandle, crossovers, suggestion, tf,
-    e9s, e20s, e50s, e9, e20, e50,
-    rsiVals, stochRsiK, stochRsiD,
-    macdLine, macdSignal, macdHist,
-    bbUpper, bbMiddle, bbLower,
-    atrVals, stVals, stBull,
-    adxVals, plusDI, minusDI,
-    obvVals, willRVals, cciVals,
-    psarVals, psarBull,
+    candles, livePrice, tf, sym,
+    e9s, e20s, e50s,
+    rsiVals, macdLine, macdSignal, macdHist,
+    stochRsiK, stochRsiD,
+    bbUpper, bbLower, bbMiddle,
     vwapVals, vwapUpper1, vwapLower1, vwapUpper2, vwapLower2,
-    cvdBarDeltas, cvdCumDeltas,
+    cvdCumDeltas, cvdBarDeltas,
+    obvVals, adxVals, plusDI, minusDI,
+    willRVals, cciVals,
+    stVals, stBull, psarVals, psarBull,
     patterns,
+    crossovers,
     activeIndicators,
+    atrVals,
   } = useStore();
 
-  // ── All candles (committed + live) ────────────────────────────────────────
-  const allCandles = useMemo(() => {
-    if (!currentCandle) return candles;
-    const last = candles[candles.length - 1];
-    if (last && last.t === currentCandle.t) return candles;
-    return [...candles, currentCandle];
-  }, [candles, currentCandle]);
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const mainRef  = useRef<HTMLCanvasElement>(null);
+  const rsiRef   = useRef<HTMLCanvasElement>(null);
+  const macdRef  = useRef<HTMLCanvasElement>(null);
+  const volRef   = useRef<HTMLCanvasElement>(null);
+  const cvdRef   = useRef<HTMLCanvasElement>(null);
+  const wrapRef  = useRef<HTMLDivElement>(null);
 
-  const visCandles = useMemo(
-    () => allCandles.slice(-CHART.visibleCandles),
-    [allCandles],
-  );
+  // ── Crosshair ─────────────────────────────────────────────────────────────
+  const [crosshair, setCrosshair] = useState<{ x: number; barIdx: number; price: number } | null>(null);
 
-  const visOffset = useMemo(
-    () => Math.max(0, allCandles.length - CHART.visibleCandles),
-    [allCandles],
-  );
+  // ── Fullscreen ────────────────────────────────────────────────────────────
+  const [fullscreen, setFullscreen] = useState(false);
 
-  // ── Price pane coordinate factory ─────────────────────────────────────────
-  function makePriceCoords(w: number, h: number) {
-    const { padRight: padR, padLeft: padL, padTop: padT, padBottom: padB } = CHART;
-    const cW  = w - padR - padL;
-    const cH  = h - padT - padB;
-    const n   = visCandles.length;
-    const cw  = cW / n;
-    const pMin = Math.min(...visCandles.map(c => c.l));
-    const pMax = Math.max(...visCandles.map(c => c.h));
+  // ── Pagination (history) ─────────────────────────────────────────────────
+  const [historyCandleOffset, setHistoryCandleOffset] = useState(0);
+  const [historyCandles, setHistoryCandles] = useState<typeof candles>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const histPageRef = useRef(0);   // how many pages of 200 we've loaded beyond current
 
-    // Expand range to include BB / ST / PSAR if active
-    let extMin = pMin, extMax = pMax;
-    if (activeIndicators.bb) {
-      bbUpper.slice(visOffset).forEach(v => { if (v) extMax = Math.max(extMax, v); });
-      bbLower.slice(visOffset).forEach(v => { if (v) extMin = Math.min(extMin, v); });
+  // ── Volume Profile toggle ─────────────────────────────────────────────────
+  const [showVP, setShowVP] = useState(true);
+
+  // ── Auto Fib ─────────────────────────────────────────────────────────────
+  const [showAutoFib, setShowAutoFib] = useState(true);
+  const [fiboOverlay, setFiboOverlay] = useState<FiboOverlay | null>(null);
+
+  // ── Divergence ────────────────────────────────────────────────────────────
+  const [divergence, setDivergence] = useState<DivergenceResult | null>(null);
+
+  // ── Drawing tools ─────────────────────────────────────────────────────────
+  const [activeTool, setActiveTool] = useState<DrawingToolKind | null>(null);
+  const [drawings, setDrawings]     = useState<Drawing[]>([]);
+  const [activeDraw, setActiveDraw] = useState<ActiveDraw | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // ── MTF confluence ────────────────────────────────────────────────────────
+  const [mtfSignals, setMtfSignals] = useState<TFSignal[]>([]);
+  const [mtfLoading, setMtfLoading] = useState(false);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Combine live + history
+  // ─────────────────────────────────────────────────────────────────────────
+  const allCandles = historyCandles.length
+    ? [...historyCandles, ...candles]
+    : candles;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Recompute derived overlays when candles change
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (showAutoFib && candles.length >= 10) {
+      setFiboOverlay(calcAutoFibo(candles, 50));
+    } else {
+      setFiboOverlay(null);
     }
-    if (activeIndicators.superTrend) {
-      stVals.slice(visOffset).forEach(v => { if (v) { extMin = Math.min(extMin, v); extMax = Math.max(extMax, v); } });
-    }
+  }, [candles, showAutoFib]);
 
-    const pad  = (extMax - extMin) * CHART.pricePadPct || extMax * 0.001;
-    const plo  = extMin - pad;
-    const phi  = extMax + pad;
-    const pR   = phi - plo || 1;
-    const tx   = (i: number) => padL + i * cw + cw / 2;
-    const ty   = (p: number) => padT + cH - (p - plo) / pR * cH;
-    return { cW, cH, cw, plo, phi, pR, padL, padT, tx, ty, n };
+  useEffect(() => {
+    if (candles.length >= 10 && rsiVals.length >= 10) {
+      setDivergence(detectRSIDivergence(candles, rsiVals, 50));
+    } else {
+      setDivergence(null);
+    }
+  }, [candles, rsiVals]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MTF signals loader
+  // ─────────────────────────────────────────────────────────────────────────
+  const loadMTF = useCallback(async () => {
+    setMtfLoading(true);
+    const results: TFSignal[] = [];
+    for (const t of TIMEFRAMES_FOR_MTF) {
+      try {
+        const ks = await fetchKlines(sym, t);
+        if (!ks || ks.length < 20) { results.push({ tf: t, trend: 'neutral', rsi: null, score: 50 }); continue; }
+
+        // Simple: last EMA9 vs EMA20 vs EMA50
+        let e9 = ks[0].c, e20 = ks[0].c, e50 = ks[0].c;
+        const k9 = 2/10, k20 = 2/21, k50 = 2/51;
+        for (const k of ks) {
+          e9  = k.c * k9  + e9  * (1 - k9);
+          e20 = k.c * k20 + e20 * (1 - k20);
+          e50 = k.c * k50 + e50 * (1 - k50);
+        }
+        // RSI simple
+        let gains = 0, losses = 0;
+        const last14 = ks.slice(-15);
+        for (let i = 1; i < last14.length; i++) {
+          const ch = last14[i].c - last14[i-1].c;
+          if (ch > 0) gains += ch; else losses -= ch;
+        }
+        const rsi = losses === 0 ? 100 : Math.round(100 - 100 / (1 + gains / losses));
+        const trend = e9 > e20 && e20 > e50 ? 'bull' : e9 < e20 && e20 < e50 ? 'bear' : 'neutral';
+        const score = trend === 'bull' ? Math.min(100, 50 + rsi / 2)
+                    : trend === 'bear' ? Math.max(0,   50 - (100 - rsi) / 2)
+                    : 50;
+        results.push({ tf: t, trend, rsi, score });
+      } catch {
+        results.push({ tf: t, trend: 'neutral', rsi: null, score: 50 });
+      }
+    }
+    setMtfSignals(results);
+    setMtfLoading(false);
+  }, [sym]);
+
+  useEffect(() => {
+    loadMTF();
+    const id = setInterval(loadMTF, 60_000);
+    return () => clearInterval(id);
+  }, [loadMTF]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // History pagination
+  // ─────────────────────────────────────────────────────────────────────────
+  const loadOlderPage = useCallback(async () => {
+    if (loadingHistory) return;
+    setLoadingHistory(true);
+    const page  = histPageRef.current + 1;
+    const limit = 200;
+    try {
+      // Try to fetch with endTime offset
+      const oldest = allCandles[0];
+      if (!oldest) { setLoadingHistory(false); return; }
+      // Binance: &endTime=<ms>&limit=200
+      const endTime = oldest.t - 1;
+      const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${tf}&limit=${limit}&endTime=${endTime}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error('fetch failed');
+      const raw = await r.json() as string[][];
+      if (!raw.length) { setLoadingHistory(false); return; }
+      const older = raw.map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] }));
+      setHistoryCandles(prev => [...older, ...prev]);
+      setHistoryCandleOffset(prev => prev + older.length);
+      histPageRef.current = page;
+    } catch { /* silent */ }
+    setLoadingHistory(false);
+  }, [sym, tf, allCandles, loadingHistory]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Keyboard shortcuts
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement).tagName === 'INPUT') return;
+      if (e.key === 'f' || e.key === 'F') setFullscreen(f => !f);
+      if (e.key === 'Escape') { setFullscreen(false); setActiveTool(null); }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedId) setDrawings(d => d.filter(x => x.id !== selectedId));
+        setSelectedId(null);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedId]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Fibo score injection into entryQuality
+  // ─────────────────────────────────────────────────────────────────────────
+  const lastAtr = atrVals.length ? atrVals[atrVals.length - 1] : null;
+  const fiboScore = fiboOverlay && livePrice
+    ? fiboEntryScore(livePrice, fiboOverlay, lastAtr)
+    : { bonus: 0, nearestLabel: null };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // DRAWING  ─────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Shared coord conversion helpers exposed to canvas mouse handlers
+  const coordRef = useRef({
+    barW:     8,
+    offset:   0,
+    minP:     0,
+    maxP:     0,
+    mainH:    300,
+    canvasW:  600,
+  });
+
+  function pixToBar(px: number) {
+    const { barW, offset, canvasW } = coordRef.current;
+    const visibleBars = Math.floor((canvasW - PADDING.left - PADDING.right - VP_W) / barW);
+    const startBar    = Math.max(0, offset);
+    return startBar + Math.floor((px - PADDING.left) / barW);
   }
 
-  // ── Draw Price Pane ───────────────────────────────────────────────────────
-  const drawPrice = useCallback(() => {
-    const el = priceRef.current;
-    if (!el) return;
-    const { ctx, w, h } = setupCanvas(el);
-    const n = visCandles.length;
-    if (n < 2) return;
-    const { cW, cH, plo, phi, pR, padL, padT, tx, ty } = makePriceCoords(w, h);
+  function pixToPrice(py: number, canvasH: number) {
+    const { minP, maxP } = coordRef.current;
+    const chartH = canvasH - PADDING.top - PADDING.bottom;
+    return maxP - ((py - PADDING.top) / chartH) * (maxP - minP);
+  }
 
-    ctx.clearRect(0, 0, w, h);
+  function barToPix(barIdx: number) {
+    const { barW, offset } = coordRef.current;
+    const startBar = Math.max(0, offset);
+    return PADDING.left + (barIdx - startBar) * barW + barW / 2;
+  }
 
-    // Grid
-    for (let i = 0; i <= CHART.gridDivisions; i++) {
-      const y = padT + cH * i / CHART.gridDivisions;
-      ctx.strokeStyle = GC; ctx.lineWidth = 0.5;
-      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + cW, y); ctx.stroke();
-      ctx.fillStyle = TC; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-      ctx.fillText(fmtPrice(phi - pR * i / CHART.gridDivisions), padL + cW + 4, y + 3.5);
+  function priceToPix(price: number, canvasH: number) {
+    const { minP, maxP } = coordRef.current;
+    const chartH = canvasH - PADDING.top - PADDING.bottom;
+    return PADDING.top + (1 - (price - minP) / (maxP - minP)) * chartH;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Main render function
+  // ─────────────────────────────────────────────────────────────────────────
+  const render = useCallback(() => {
+    const canvas = mainRef.current;
+    if (!canvas) return;
+    const ctx    = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // CSS variable colours (resolved once)
+    const cs = getComputedStyle(canvas);
+    const COL = {
+      bg:     cs.getPropertyValue('--bg2').trim()    || '#0d1017',
+      bg3:    cs.getPropertyValue('--bg3').trim()    || '#131820',
+      border: cs.getPropertyValue('--border').trim() || 'rgba(255,255,255,0.06)',
+      text:   cs.getPropertyValue('--text').trim()   || '#dde2ef',
+      text2:  cs.getPropertyValue('--text2').trim()  || '#6b7591',
+      text3:  cs.getPropertyValue('--text3').trim()  || '#3d4460',
+      green:  cs.getPropertyValue('--green').trim()  || '#00e5a0',
+      red:    cs.getPropertyValue('--red').trim()    || '#ff3d5a',
+      amber:  cs.getPropertyValue('--amber').trim()  || '#ffb82e',
+      blue:   cs.getPropertyValue('--blue').trim()   || '#4da6ff',
+      purple: cs.getPropertyValue('--purple').trim() || '#a78bff',
+      ema9:   cs.getPropertyValue('--ema9').trim()   || '#ff6b35',
+      ema20:  cs.getPropertyValue('--ema20').trim()  || '#4da6ff',
+      ema50:  cs.getPropertyValue('--ema50').trim()  || '#a78bff',
+    };
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = COL.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    if (!allCandles.length) {
+      ctx.fillStyle = COL.text2;
+      ctx.font = '11px JetBrains Mono, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Loading candles…', W / 2, H / 2);
+      return;
     }
 
-    // Suggestion levels
-    if (suggestion?.entry && suggestion?.stop) {
-      const levels = [
-        { price: suggestion.entry,  color: 'rgba(77,166,255,0.7)',  label: 'ENT '  + fmtPrice(suggestion.entry)  },
-        { price: suggestion.stop,   color: 'rgba(255,61,90,0.6)',   label: 'SL '   + fmtPrice(suggestion.stop)   },
-        { price: suggestion.target, color: 'rgba(0,229,160,0.6)',   label: 'TP '   + fmtPrice(suggestion.target) },
-      ];
-      ctx.setLineDash([4, 4]);
-      levels.forEach(lv => {
-        if (!lv.price || lv.price < plo || lv.price > phi) return;
-        const ly = ty(lv.price);
-        ctx.strokeStyle = lv.color; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(padL, ly); ctx.lineTo(padL + cW, ly); ctx.stroke();
-        ctx.fillStyle = lv.color; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-        ctx.fillText(lv.label, padL + cW + 4, ly + 3.5);
+    // ── Visible range ───────────────────────────────────────────────────────
+    const chartW = W - PADDING.left - PADDING.right - VP_W;
+    const barW   = Math.max(3, Math.min(16, Math.floor(chartW / 80)));
+    const visN   = Math.floor(chartW / barW);
+    const startI = Math.max(0, allCandles.length - visN);
+    const visCandles = allCandles.slice(startI);
+
+    // Store for mouse coord conversion
+    coordRef.current.barW    = barW;
+    coordRef.current.offset  = startI;
+    coordRef.current.canvasW = W;
+
+    // Price range with 4% padding
+    const highs = visCandles.map(c => c.h);
+    const lows  = visCandles.map(c => c.l);
+    let maxP = Math.max(...highs);
+    let minP = Math.min(...lows);
+    const pad  = (maxP - minP) * 0.04 || maxP * 0.01;
+    maxP += pad; minP -= pad;
+
+    coordRef.current.minP   = minP;
+    coordRef.current.maxP   = maxP;
+    coordRef.current.mainH  = H;
+
+    const pY = (p: number) => PADDING.top + (1 - (p - minP) / (maxP - minP)) * (H - PADDING.top - PADDING.bottom);
+    const bX = (i: number) => PADDING.left + i * barW + barW / 2;
+
+    // ── Grid lines ──────────────────────────────────────────────────────────
+    ctx.strokeStyle = COL.border;
+    ctx.lineWidth   = 0.5;
+    const steps = 5;
+    for (let i = 0; i <= steps; i++) {
+      const p  = minP + (maxP - minP) * (i / steps);
+      const y  = pY(p);
+      ctx.beginPath(); ctx.moveTo(PADDING.left, y); ctx.lineTo(W - PADDING.right - VP_W, y);
+      ctx.stroke();
+      ctx.fillStyle = COL.text3;
+      ctx.font = '9px JetBrains Mono, monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(fmtPrice(p), W - VP_W - 2, y - 2);
+    }
+
+    // ── Volume Profile (right-side histogram) ────────────────────────────────
+    if (showVP) {
+      const vp: VolumeProfile = calcVolumeProfile(visCandles, 24);
+      const vpMaxVol = Math.max(...vp.buckets.map(b => b.vol), 1);
+      const vpX0 = W - VP_W;
+      const priceH = H - PADDING.top - PADDING.bottom;
+
+      for (const bkt of vp.buckets) {
+        const y   = pY(bkt.price + (maxP - minP) / (24 * 2));
+        const y2  = pY(bkt.price - (maxP - minP) / (24 * 2));
+        const bH  = Math.max(1, Math.abs(y2 - y));
+        const w   = (bkt.vol / vpMaxVol) * (VP_W - 4);
+        const isPOC = Math.abs(bkt.price - vp.poc) < (maxP - minP) / 48;
+        ctx.fillStyle = isPOC
+          ? 'rgba(255,184,46,0.65)'
+          : bkt.buyVol >= bkt.sellVol
+            ? 'rgba(0,229,160,0.22)'
+            : 'rgba(255,61,90,0.22)';
+        ctx.fillRect(vpX0 + 2, Math.min(y, y2), w, bH);
+
+        if (isPOC) {
+          ctx.strokeStyle = 'rgba(255,184,46,0.9)';
+          ctx.lineWidth = 0.8;
+          ctx.beginPath(); ctx.moveTo(PADDING.left, pY(vp.poc)); ctx.lineTo(vpX0, pY(vp.poc));
+          ctx.stroke();
+          ctx.fillStyle = 'rgba(255,184,46,0.9)';
+          ctx.font = '8px JetBrains Mono, monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText('POC', vpX0 + 2, pY(vp.poc) - 2);
+        }
+      }
+      // VAH / VAL
+      ctx.strokeStyle = 'rgba(255,184,46,0.3)';
+      ctx.setLineDash([2, 4]);
+      ctx.lineWidth = 0.7;
+      [vp.vahPrice, vp.valPrice].forEach(p => {
+        ctx.beginPath(); ctx.moveTo(PADDING.left, pY(p)); ctx.lineTo(vpX0, pY(p)); ctx.stroke();
       });
       ctx.setLineDash([]);
     }
 
-    // ── Bollinger Bands ───────────────────────────────────────────────────
-    if (activeIndicators.bb) {
-      const ubSlice = bbUpper.slice(visOffset);
-      const mbSlice = bbMiddle.slice(visOffset);
-      const lbSlice = bbLower.slice(visOffset);
-      const startI  = n - ubSlice.length;
-
-      // Fill
-      ctx.beginPath();
-      ubSlice.forEach((v, i) => { if (v == null) return; ctx[i === 0 ? 'moveTo' : 'lineTo'](tx(startI + i), ty(v)); });
-      lbSlice.slice().reverse().forEach((v, i) => { if (v == null) return; ctx.lineTo(tx(startI + lbSlice.length - 1 - i), ty(v)); });
-      ctx.closePath();
-      ctx.fillStyle = COL.bbFill; ctx.fill();
-
-      // Lines
-      ['upper' as const, 'middle' as const, 'lower' as const].forEach((band, bi) => {
-        const slice = bi === 0 ? ubSlice : bi === 1 ? mbSlice : lbSlice;
-        ctx.strokeStyle = COL.bb; ctx.lineWidth = bi === 1 ? 0.8 : 1; ctx.lineJoin = 'round';
-        if (bi === 1) ctx.setLineDash([3, 3]);
-        ctx.beginPath(); let started = false;
-        slice.forEach((v, i) => {
-          if (v == null) { started = false; return; }
-          if (!started) { ctx.moveTo(tx(startI + i), ty(v)); started = true; } else ctx.lineTo(tx(startI + i), ty(v));
-        });
-        ctx.stroke(); ctx.setLineDash([]);
+    // ── Auto Fibonacci ───────────────────────────────────────────────────────
+    if (showAutoFib && fiboOverlay) {
+      const vpX0 = W - VP_W;
+      fiboOverlay.levels.forEach((lvl, li) => {
+        const y = pY(lvl.price);
+        if (y < PADDING.top - 10 || y > H - PADDING.bottom + 10) return;
+        ctx.strokeStyle = hexAlpha(lvl.color, 0.45);
+        ctx.setLineDash([3, 5]);
+        ctx.lineWidth = lvl.ratio === 0.618 || lvl.ratio === 0.5 ? 1.2 : 0.8;
+        ctx.beginPath(); ctx.moveTo(PADDING.left, y); ctx.lineTo(vpX0, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = hexAlpha(lvl.color, 0.85);
+        ctx.font = '8px JetBrains Mono, monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(`${lvl.label} ${fmtPrice(lvl.price)}`, vpX0 - 2, y - 2);
       });
     }
 
-    // ── VWAP ──────────────────────────────────────────────────────────────
+    // ── EMA lines ────────────────────────────────────────────────────────────
+    const drawLine = (series: (number | null)[], color: string, width = 1, dash: number[] = []) => {
+      ctx.strokeStyle = color; ctx.lineWidth = width;
+      if (dash.length) ctx.setLineDash(dash); else ctx.setLineDash([]);
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < visCandles.length; i++) {
+        const idx = startI + i;
+        const val = series[idx];
+        if (val == null) continue;
+        const x = bX(i), y = pY(val);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    };
+
+    if (activeIndicators.ema9)  drawLine(e9s,  COL.ema9,  1.2);
+    if (activeIndicators.ema20) drawLine(e20s, COL.ema20, 1.2);
+    if (activeIndicators.ema50) drawLine(e50s, COL.ema50, 1.2);
+
+    // BB
+    if (activeIndicators.bb) {
+      drawLine(bbUpper,  'rgba(77,166,255,0.4)', 0.8, [3,3]);
+      drawLine(bbMiddle, 'rgba(77,166,255,0.55)',0.8, [2,2]);
+      drawLine(bbLower,  'rgba(77,166,255,0.4)', 0.8, [3,3]);
+    }
+
+    // VWAP
     if (activeIndicators.vwap) {
-      const vSlice = vwapVals.slice(visOffset);
-      const startI = n - vSlice.length;
-
+      drawLine(vwapVals, 'rgba(255,184,46,0.8)', 1.2);
       if (activeIndicators.vwapBands) {
-        // ±2σ fill
-        const u2 = vwapUpper2.slice(visOffset);
-        const l2 = vwapLower2.slice(visOffset);
-        ctx.beginPath();
-        u2.forEach((v, i) => { if (v == null) return; ctx[i === 0 ? 'moveTo' : 'lineTo'](tx(startI + i), ty(v)); });
-        l2.slice().reverse().forEach((v, i) => { if (v == null) return; ctx.lineTo(tx(startI + l2.length - 1 - i), ty(v)); });
-        ctx.closePath(); ctx.fillStyle = COL.vwapBand2; ctx.fill();
-
-        // ±1σ fill
-        const u1 = vwapUpper1.slice(visOffset);
-        const l1 = vwapLower1.slice(visOffset);
-        ctx.beginPath();
-        u1.forEach((v, i) => { if (v == null) return; ctx[i === 0 ? 'moveTo' : 'lineTo'](tx(startI + i), ty(v)); });
-        l1.slice().reverse().forEach((v, i) => { if (v == null) return; ctx.lineTo(tx(startI + l1.length - 1 - i), ty(v)); });
-        ctx.closePath(); ctx.fillStyle = COL.vwapBand1; ctx.fill();
-
-        // Band lines (dashed, subtle)
-        [u1, l1, u2, l2].forEach((sl, idx) => {
-          ctx.strokeStyle = idx < 2 ? 'rgba(0,212,255,0.4)' : 'rgba(0,212,255,0.2)';
-          ctx.lineWidth = 0.6; ctx.setLineDash([2, 4]);
-          ctx.beginPath(); let started = false;
-          sl.forEach((v, i) => {
-            if (v == null) { started = false; return; }
-            if (!started) { ctx.moveTo(tx(startI + i), ty(v)); started = true; } else ctx.lineTo(tx(startI + i), ty(v));
-          });
-          ctx.stroke(); ctx.setLineDash([]);
-        });
-      }
-
-      // Main VWAP line
-      ctx.strokeStyle = COL.vwap; ctx.lineWidth = 1.4; ctx.lineJoin = 'round';
-      ctx.setLineDash([5, 3]);
-      ctx.beginPath(); let vs = false;
-      vSlice.forEach((v, i) => {
-        if (v == null) { vs = false; return; }
-        if (!vs) { ctx.moveTo(tx(startI + i), ty(v)); vs = true; } else ctx.lineTo(tx(startI + i), ty(v));
-      });
-      ctx.stroke(); ctx.setLineDash([]);
-
-      // Label
-      const lastV = [...vSlice].reverse().find(v => v != null) as number | undefined;
-      if (lastV != null) {
-        ctx.fillStyle = COL.vwap; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-        ctx.fillText('VWAP ' + fmtPrice(lastV), padL + cW + 4, ty(lastV) + 3.5);
+        drawLine(vwapUpper1, 'rgba(255,184,46,0.35)', 0.7, [2,4]);
+        drawLine(vwapLower1, 'rgba(255,184,46,0.35)', 0.7, [2,4]);
+        drawLine(vwapUpper2, 'rgba(255,184,46,0.2)',  0.7, [2,4]);
+        drawLine(vwapLower2, 'rgba(255,184,46,0.2)',  0.7, [2,4]);
       }
     }
 
-    // ── SuperTrend ────────────────────────────────────────────────────────
+    // SuperTrend
     if (activeIndicators.superTrend) {
-      const stSlice   = stVals.slice(visOffset);
-      const bullSlice = stBull.slice(visOffset);
-      const startI    = n - stSlice.length;
-      ctx.lineWidth = 2; ctx.lineJoin = 'round';
-      let prevBull = bullSlice[0];
-      ctx.beginPath(); let started = false;
-      stSlice.forEach((v, i) => {
-        if (v == null) { started = false; return; }
-        const bull = bullSlice[i];
-        if (bull !== prevBull || !started) {
-          if (started) ctx.stroke();
-          ctx.strokeStyle = bull ? COL.superTrendBull : COL.superTrendBear;
-          ctx.beginPath(); ctx.moveTo(tx(startI + i), ty(v));
-          started = true; prevBull = bull;
-        } else { ctx.lineTo(tx(startI + i), ty(v)); }
-      });
-      if (started) ctx.stroke();
+      for (let i = 1; i < visCandles.length; i++) {
+        const idx = startI + i;
+        const v1 = stVals[idx - 1], v2 = stVals[idx];
+        const b1 = stBull[idx - 1], b2 = stBull[idx];
+        if (v1 == null || v2 == null) continue;
+        ctx.strokeStyle = b2 ? COL.green : COL.red;
+        ctx.lineWidth = 1.2;
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(bX(i-1), pY(v1)); ctx.lineTo(bX(i), pY(v2)); ctx.stroke();
+      }
     }
 
-    // ── Parabolic SAR ─────────────────────────────────────────────────────
+    // ── Candles ──────────────────────────────────────────────────────────────
+    for (let i = 0; i < visCandles.length; i++) {
+      const c   = visCandles[i];
+      const x   = bX(i);
+      const bull = c.c >= c.o;
+      const col  = bull ? COL.green : COL.red;
+      const bW   = Math.max(1, barW - 2);
+
+      // Wick
+      ctx.strokeStyle = col;
+      ctx.lineWidth   = 1;
+      ctx.beginPath(); ctx.moveTo(x, pY(c.h)); ctx.lineTo(x, pY(c.l)); ctx.stroke();
+
+      // Body
+      const yO = pY(c.o), yC = pY(c.c);
+      const bH = Math.max(1, Math.abs(yC - yO));
+      ctx.fillStyle = bull ? hexAlpha(COL.green, 0.75) : hexAlpha(COL.red, 0.75);
+      ctx.fillRect(x - bW / 2, Math.min(yO, yC), bW, bH);
+    }
+
+    // PSAR dots
     if (activeIndicators.psar) {
-      const psSlice = psarVals.slice(visOffset);
-      const pbSlice = psarBull.slice(visOffset);
-      const startI  = n - psSlice.length;
-      psSlice.forEach((v, i) => {
-        if (v == null) return;
-        const bull = pbSlice[i];
-        ctx.fillStyle = COL.psar;
+      for (let i = 0; i < visCandles.length; i++) {
+        const idx = startI + i;
+        const v = psarVals[idx];
+        if (v == null) continue;
         ctx.beginPath();
-        ctx.arc(tx(startI + i), ty(v), 2.5, 0, Math.PI * 2);
+        ctx.arc(bX(i), pY(v), 2, 0, Math.PI * 2);
+        ctx.fillStyle = psarBull[idx] ? COL.green : COL.red;
         ctx.fill();
-      });
+      }
     }
 
-    // ── EMA lines ─────────────────────────────────────────────────────────
-    const emaLines: [(number | null)[], string, boolean][] = [
-      [e50s.slice(visOffset), COL.ema50, activeIndicators.ema50],
-      [e20s.slice(visOffset), COL.ema20, activeIndicators.ema20],
-      [e9s.slice(visOffset),  COL.ema9,  activeIndicators.ema9],
-    ];
-    emaLines.forEach(([vals, col, show]) => {
-      if (!show || !vals || vals.length < 2) return;
-      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
-      ctx.beginPath(); let started = false;
-      vals.forEach((v, i) => {
-        if (v == null) { started = false; return; }
-        const xi = tx(i), yi = ty(v);
-        if (!started) { ctx.moveTo(xi, yi); started = true; } else ctx.lineTo(xi, yi);
-      });
-      ctx.stroke();
-    });
-
-    // ── Candles ───────────────────────────────────────────────────────────
-    const cw2 = (w - CHART.padRight - CHART.padLeft) / n;
-    visCandles.forEach((c, i) => {
-      const x      = tx(i);
-      const bw     = Math.max(2, cw2 * CHART.candleWidthRatio);
-      const isLast = i === n - 1;
-      const col    = isLast ? '#888' : (c.c >= c.o ? COL.bull : COL.bear);
-      ctx.strokeStyle = col; ctx.lineWidth = 0.8;
-      ctx.beginPath(); ctx.moveTo(x, ty(c.h)); ctx.lineTo(x, ty(c.l)); ctx.stroke();
-      const bT = ty(Math.max(c.o, c.c)), bB = ty(Math.min(c.o, c.c));
-      ctx.fillStyle = isLast ? 'rgba(140,140,140,0.5)' : col;
-      ctx.fillRect(x - bw / 2, bT, bw, Math.max(1, bB - bT));
-    });
-
-    // ── Crossover markers ─────────────────────────────────────────────────
-    crossovers.forEach((x: { idx: number; price: number; type: string }) => {
-      const vi = x.idx - visOffset;
-      if (vi < 0 || vi >= n) return;
-      const candle = allCandles[x.idx];
-      if (!candle) return;
-      ctx.fillStyle = x.type === 'bull' ? 'rgba(0,229,160,0.9)' : 'rgba(255,61,90,0.9)';
-      ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(x.type === 'bull' ? '▲' : '▼', tx(vi), ty(candle.l) + 14);
-    });
-
-    // ── Candlestick pattern markers ───────────────────────────────────────
+    // Candlestick pattern labels
     if (activeIndicators.patterns) {
-      const patSlice = patterns.slice(visOffset);
-      patSlice.forEach((pats, i) => {
-        if (!pats || pats.length === 0) return;
-        const candle = visCandles[i];
-        if (!candle) return;
-        const bull = pats.some(p => p.bull);
-        ctx.fillStyle = bull ? 'rgba(0,229,160,0.8)' : 'rgba(255,61,90,0.8)';
-        ctx.font = '8px sans-serif'; ctx.textAlign = 'center';
-        const label = pats[0].label;
-        ctx.fillText(label, tx(i), bull ? ty(candle.l) + 22 : ty(candle.h) - 6);
-      });
+      for (let i = 0; i < visCandles.length; i++) {
+        const idx = startI + i;
+        const pats = patterns[idx];
+        if (!pats || !pats.length) continue;
+        const y = pY(visCandles[i].l) + 10;
+        ctx.fillStyle = COL.amber;
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(pats[0].label, bX(i), y);
+      }
     }
 
-    // ── X-axis time labels ────────────────────────────────────────────────
-    const step = Math.max(1, Math.floor(n / 6));
-    ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.font = '8px JetBrains Mono, monospace'; ctx.textAlign = 'center';
-    for (let i = step; i < n - 1; i += step) {
-      const c = visCandles[i];
-      if (!c?.t) continue;
-      const d     = new Date(c.t);
-      const hh    = d.getHours().toString().padStart(2, '0');
-      const mm    = d.getMinutes().toString().padStart(2, '0');
-      const label = tf === '1d' ? `${d.getMonth() + 1}/${d.getDate()}` : `${hh}:${mm}`;
-      ctx.fillText(label, tx(i), h - 1);
+    // ── Drawn objects (h-line, trendline, fib, rect) ─────────────────────────
+    for (const d of drawings) {
+      const isSelected = d.id === selectedId;
+      ctx.save();
+      ctx.globalAlpha = 1;
+      if (d.kind === 'hline') {
+        const y = pY(d.price);
+        ctx.strokeStyle = isSelected ? COL.amber : d.color;
+        ctx.lineWidth   = isSelected ? 1.5 : 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(PADDING.left, y); ctx.lineTo(W - PADDING.right - VP_W, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = isSelected ? COL.amber : d.color;
+        ctx.font = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtPrice(d.price), W - PADDING.right - VP_W - 2, y - 3);
+      } else if (d.kind === 'trendline') {
+        const x1 = barToPix(d.x1), y1 = priceToPix(d.y1, H);
+        const x2 = barToPix(d.x2), y2 = priceToPix(d.y2, H);
+        ctx.strokeStyle = isSelected ? COL.amber : d.color;
+        ctx.lineWidth = isSelected ? 1.8 : 1.2;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      } else if (d.kind === 'rect') {
+        const x1 = barToPix(d.x1), y1 = priceToPix(d.y1, H);
+        const x2 = barToPix(d.x2), y2 = priceToPix(d.y2, H);
+        ctx.strokeStyle = isSelected ? COL.amber : d.color;
+        ctx.lineWidth = 1;
+        ctx.fillStyle = d.color;
+        ctx.globalAlpha = d.fillOpacity;
+        ctx.fillRect(Math.min(x1,x2), Math.min(y1,y2), Math.abs(x2-x1), Math.abs(y2-y1));
+        ctx.globalAlpha = 1;
+        ctx.strokeRect(Math.min(x1,x2), Math.min(y1,y2), Math.abs(x2-x1), Math.abs(y2-y1));
+      } else if (d.kind === 'fib') {
+        const rng  = Math.abs(d.y2 - d.y1);
+        const dir  = d.y2 > d.y1 ? 1 : -1;
+        for (let li = 0; li < d.levels.length; li++) {
+          const price = d.y1 + dir * d.levels[li] * rng;
+          const y     = pY(price);
+          ctx.strokeStyle = hexAlpha(FIBO_COLORS[li] || d.color, 0.6);
+          ctx.lineWidth   = 0.8;
+          ctx.setLineDash([3, 4]);
+          ctx.beginPath();
+          ctx.moveTo(barToPix(d.x1), y);
+          ctx.lineTo(barToPix(d.x2), y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+      ctx.restore();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visCandles, allCandles, visOffset, e9s, e20s, e50s, bbUpper, bbMiddle, bbLower,
-      vwapVals, vwapUpper1, vwapLower1, vwapUpper2, vwapLower2,
-      stVals, stBull, psarVals, psarBull, crossovers, patterns, suggestion, tf, activeIndicators]);
 
-  // ── Crosshair overlay ─────────────────────────────────────────────────────
-  const drawCrosshair = useCallback((idx: number) => {
-    const el = overlayRef.current;
-    if (!el) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    if (idx < 0 || idx >= visCandles.length) return;
-    const { cH, padL, padT, tx } = makePriceCoords(w, h);
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(tx(idx), padT); ctx.lineTo(tx(idx), padT + cH); ctx.stroke();
-    ctx.setLineDash([]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visCandles]);
+    // ── Live price line ───────────────────────────────────────────────────────
+    if (livePrice > 0) {
+      const y  = pY(livePrice);
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth   = 0.6;
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath(); ctx.moveTo(PADDING.left, y); ctx.lineTo(W - PADDING.right - VP_W, y); ctx.stroke();
+      ctx.setLineDash([]);
+      // Badge
+      ctx.fillStyle = 'rgba(0,229,160,0.15)';
+      const txt = fmtPrice(livePrice);
+      ctx.font = '10px JetBrains Mono, monospace';
+      const tw = ctx.measureText(txt).width;
+      ctx.fillRect(W - PADDING.right - VP_W + 2, y - 8, tw + 8, 15);
+      ctx.fillStyle = COL.green;
+      ctx.textAlign = 'left';
+      ctx.fillText(txt, W - PADDING.right - VP_W + 6, y + 3);
+    }
 
-  // ── Draw MACD ─────────────────────────────────────────────────────────────
-  const drawMACD = useCallback(() => {
-    const el = macdRef.current;
-    if (!el || !activeIndicators.macd) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n = CHART.visibleCandles;
-    const { cW, cH, cw, padL, padT } = makePaneCoords(w, h, 68, 2, 4, 4, n);
+    // ── Crosshair ────────────────────────────────────────────────────────────
+    if (crosshair) {
+      const cx = crosshair.x;
+      const cy = pY(crosshair.price);
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth   = 0.6;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(cx, PADDING.top); ctx.lineTo(cx, H - PADDING.bottom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PADDING.left, cy); ctx.lineTo(W - PADDING.right - VP_W, cy); ctx.stroke();
+      ctx.setLineDash([]);
+      // Price label
+      ctx.fillStyle = 'rgba(30,40,60,0.85)';
+      ctx.font = '10px JetBrains Mono, monospace';
+      const ptxt = fmtPrice(crosshair.price);
+      const ptw  = ctx.measureText(ptxt).width;
+      ctx.fillRect(W - PADDING.right - VP_W + 2, cy - 8, ptw + 8, 15);
+      ctx.fillStyle = COL.text;
+      ctx.textAlign = 'left';
+      ctx.fillText(ptxt, W - PADDING.right - VP_W + 6, cy + 3);
+    }
 
-    const hSlice = macdHist.slice(visOffset);
-    const lSlice = macdLine.slice(visOffset);
-    const sSlice = macdSignal.slice(visOffset);
-    const startI = n - hSlice.length;
-
-    const allVals = [...hSlice, ...lSlice, ...sSlice].filter(v => v != null) as number[];
-    if (!allVals.length) return;
-    const loV = Math.min(...allVals), hiV = Math.max(...allVals);
-    const range = hiV - loV || 1;
-    const midY  = padT + cH / 2;
-    const ty    = (v: number) => padT + (1 - (v - loV) / range) * cH;
-
-    // Zero line
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 0.5;
-    ctx.beginPath(); ctx.moveTo(padL, midY); ctx.lineTo(padL + cW, midY); ctx.stroke();
-
-    // Histogram bars
-    hSlice.forEach((v, i) => {
-      if (v == null) return;
-      const barH = Math.abs(ty(v) - ty(0));
-      ctx.fillStyle = v >= 0 ? COL.macdBull : COL.macdBear;
-      ctx.fillRect(padL + (startI + i) * cw + 1, v >= 0 ? ty(v) : ty(0), Math.max(1, cw - 2), Math.max(1, barH));
-    });
-
-    // MACD + Signal lines
-    [[lSlice, COL.macdLine, 1.5], [sSlice, COL.macdSig, 1]].forEach(([sl, col, lw]) => {
-      const series = sl as (number | null)[];
-      ctx.strokeStyle = col as string; ctx.lineWidth = lw as number; ctx.lineJoin = 'round';
-      ctx.beginPath(); let started = false;
-      series.forEach((v, i) => {
-        if (v == null) { started = false; return; }
-        if (!started) { ctx.moveTo(padL + (startI + i) * cw + cw / 2, ty(v)); started = true; }
-        else ctx.lineTo(padL + (startI + i) * cw + cw / 2, ty(v));
-      });
-      ctx.stroke();
-    });
-
-    // Label
-    const lastM = [...lSlice].reverse().find(v => v != null);
-    const lastS = [...sSlice].reverse().find(v => v != null);
-    ctx.fillStyle = TC; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-    if (lastM != null) ctx.fillText('M ' + (lastM as number).toFixed(4), padL + cW + 4, padT + 10);
-    if (lastS != null) ctx.fillText('S ' + (lastS as number).toFixed(4), padL + cW + 4, padT + 20);
-  }, [macdHist, macdLine, macdSignal, visOffset, activeIndicators.macd]);
-
-  // ── Draw RSI ──────────────────────────────────────────────────────────────
-  const drawRSI = useCallback(() => {
-    const el = rsiRef.current;
-    if (!el || !activeIndicators.rsi) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n = CHART.visibleCandles;
-    const rv = rsiVals.slice(visOffset);
-
-    // Overbought/sold fills
-    const { cW, cH, cw, padL, padT } = makePaneCoords(w, h, 68, 2, 4, 4, n);
-    const ty = (v: number) => padT + (100 - v) / 100 * cH;
-    ctx.fillStyle = 'rgba(255,61,90,0.05)';
-    ctx.fillRect(padL, padT, cW, ty(70) - padT);
-    ctx.fillStyle = 'rgba(0,229,160,0.05)';
-    ctx.fillRect(padL, ty(30), cW, padT + cH - ty(30));
-
-    drawOscillatorPane(ctx, w, h, rv, COL.rsi, 0, 100,
-      [{ v: 70, col: 'rgba(255,61,90,0.3)', dash: true },
-       { v: 50, col: 'rgba(255,255,255,0.08)' },
-       { v: 30, col: 'rgba(0,229,160,0.3)', dash: true }],
-      n);
-
-    // Gradient fill under RSI
-    const startI = n - rv.length;
-    const validPts = rv
-      .map((v, i) => v != null ? { x: padL + (startI + i) * cw + cw / 2, y: ty(v as number) } : null)
-      .filter(Boolean) as { x: number; y: number }[];
-    if (validPts.length > 1) {
-      const grad = ctx.createLinearGradient(0, padT, 0, padT + cH);
-      grad.addColorStop(0, 'rgba(255,184,46,0.15)');
-      grad.addColorStop(1, 'rgba(255,184,46,0)');
+    // ── Divergence badge on chart ─────────────────────────────────────────────
+    if (divergence) {
+      const col   = divergence.type.includes('bull') ? COL.green : COL.red;
+      const badge = divergence.label;
+      ctx.font = 'bold 10px JetBrains Mono, monospace';
+      const tw  = ctx.measureText(badge).width;
+      const bx  = PADDING.left + 6;
+      const by  = PADDING.top + 6;
+      ctx.fillStyle = hexAlpha(col, 0.15);
       ctx.beginPath();
-      ctx.moveTo(validPts[0].x, padT + cH);
-      validPts.forEach(p => ctx.lineTo(p.x, p.y));
-      ctx.lineTo(validPts[validPts.length - 1].x, padT + cH);
-      ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
-    }
-  }, [rsiVals, visOffset, activeIndicators.rsi]);
-
-  // ── Draw Stoch RSI ────────────────────────────────────────────────────────
-  const drawStochRSI = useCallback(() => {
-    const el = stochRef.current;
-    if (!el || !activeIndicators.stochRsi) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n  = CHART.visibleCandles;
-    const kv = stochRsiK.slice(visOffset);
-    const dv = stochRsiD.slice(visOffset);
-    drawOscillatorPane(ctx, w, h, kv, COL.stochK, 0, 100,
-      [{ v: 80, col: 'rgba(255,61,90,0.3)', dash: true },
-       { v: 50, col: 'rgba(255,255,255,0.08)' },
-       { v: 20, col: 'rgba(0,229,160,0.3)', dash: true }],
-      n, { vals: dv, color: COL.stochD });
-  }, [stochRsiK, stochRsiD, visOffset, activeIndicators.stochRsi]);
-
-  // ── Draw ADX ──────────────────────────────────────────────────────────────
-  const drawADX = useCallback(() => {
-    const el = adxRef.current;
-    if (!el || !activeIndicators.adx) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n   = CHART.visibleCandles;
-    const av  = adxVals.slice(visOffset);
-    const pv  = plusDI.slice(visOffset);
-    const mv  = minusDI.slice(visOffset);
-    drawOscillatorPane(ctx, w, h, av, COL.adx, 0, 100,
-      [{ v: 25, col: 'rgba(167,139,255,0.3)', dash: true },
-       { v: 50, col: 'rgba(255,255,255,0.06)' }],
-      n);
-    // +DI and -DI
-    [{ vals: pv, col: COL.plusDI }, { vals: mv, col: COL.minusDI }].forEach(({ vals, col }) => {
-      const { cW, cw, padL, padT, cH } = makePaneCoords(w, h, 68, 2, 4, 4, n);
-      const startI = n - vals.length;
-      const ty = (v: number) => padT + (1 - v / 100) * cH;
-      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.lineJoin = 'round';
-      ctx.setLineDash([2, 3]);
-      ctx.beginPath(); let started = false;
-      vals.forEach((v, i) => {
-        if (v == null) { started = false; return; }
-        if (!started) { ctx.moveTo(padL + (startI + i) * cw + cw / 2, ty(v)); started = true; }
-        else ctx.lineTo(padL + (startI + i) * cw + cw / 2, ty(v));
-      });
-      ctx.stroke(); ctx.setLineDash([]);
-    });
-  }, [adxVals, plusDI, minusDI, visOffset, activeIndicators.adx]);
-
-  // ── Draw Williams %R ──────────────────────────────────────────────────────
-  const drawWillR = useCallback(() => {
-    const el = willRRef.current;
-    if (!el || !activeIndicators.williamsR) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n  = CHART.visibleCandles;
-    const wv = willRVals.slice(visOffset);
-    drawOscillatorPane(ctx, w, h, wv, COL.willR, -100, 0,
-      [{ v: -20, col: 'rgba(255,61,90,0.3)', dash: true },
-       { v: -50, col: 'rgba(255,255,255,0.08)' },
-       { v: -80, col: 'rgba(0,229,160,0.3)', dash: true }],
-      n);
-  }, [willRVals, visOffset, activeIndicators.williamsR]);
-
-  // ── Draw CCI ──────────────────────────────────────────────────────────────
-  const drawCCI = useCallback(() => {
-    const el = cciRef.current;
-    if (!el || !activeIndicators.cci) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n  = CHART.visibleCandles;
-    const cv = cciVals.slice(visOffset);
-    const allV = cv.filter(v => v != null) as number[];
-    const lo = Math.min(-200, ...allV);
-    const hi = Math.max(200,  ...allV);
-    drawOscillatorPane(ctx, w, h, cv, COL.cci, lo, hi,
-      [{ v: 100,  col: 'rgba(255,61,90,0.3)', dash: true },
-       { v: 0,    col: 'rgba(255,255,255,0.08)' },
-       { v: -100, col: 'rgba(0,229,160,0.3)', dash: true }],
-      n);
-  }, [cciVals, visOffset, activeIndicators.cci]);
-
-  // ── Draw Volume ───────────────────────────────────────────────────────────
-  const drawVol = useCallback(() => {
-    const el = volRef.current;
-    if (!el || !activeIndicators.volume) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    if (!visCandles.length) return;
-    const { cW, cH, cw, padL, padT } = makePaneCoords(w, h, 68, 2, 4, 2, visCandles.length);
-    const maxV = Math.max(...visCandles.map(c => c.v));
-    const avgV = visCandles.reduce((a, c) => a + c.v, 0) / visCandles.length;
-    const avgY = padT + cH - (avgV / maxV) * cH;
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 0.8;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(padL, avgY); ctx.lineTo(padL + cW, avgY); ctx.stroke();
-    ctx.setLineDash([]);
-
-    visCandles.forEach((c, i) => {
-      const isLast   = i === visCandles.length - 1;
-      const aboveAvg = c.v > avgV;
-      ctx.fillStyle = isLast
-        ? 'rgba(150,148,138,0.3)'
-        : c.c >= c.o
-          ? (aboveAvg ? 'rgba(0,229,160,0.55)' : 'rgba(0,229,160,0.25)')
-          : (aboveAvg ? 'rgba(255,61,90,0.55)'  : 'rgba(255,61,90,0.25)');
-      const bH = Math.max(1, (c.v / maxV) * cH);
-      ctx.fillRect(padL + i * cw + 1, padT + cH - bH, Math.max(1, cw - 2), bH);
-    });
-
-    // Avg vol label
-    ctx.fillStyle = TC; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-    ctx.fillText('avg ' + fmtK(avgV), padL + cW + 4, avgY + 3.5);
-  }, [visCandles, activeIndicators.volume]);
-
-  // ── Draw OBV ──────────────────────────────────────────────────────────────
-  const drawOBV = useCallback(() => {
-    const el = obvRef.current;
-    if (!el || !activeIndicators.obv) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const n  = CHART.visibleCandles;
-    const ov = obvVals.slice(visOffset);
-    if (ov.length < 2) return;
-    const { cW, cH, cw, padL, padT } = makePaneCoords(w, h, 68, 2, 4, 4, n);
-    const lo = Math.min(...ov), hi = Math.max(...ov);
-    const range = hi - lo || 1;
-    const ty = (v: number) => padT + (1 - (v - lo) / range) * cH;
-    const startI = n - ov.length;
-
-    ctx.strokeStyle = COL.obv; ctx.lineWidth = 1.4; ctx.lineJoin = 'round';
-    ctx.beginPath();
-    ov.forEach((v, i) => i === 0 ? ctx.moveTo(padL + (startI + i) * cw + cw / 2, ty(v)) : ctx.lineTo(padL + (startI + i) * cw + cw / 2, ty(v)));
-    ctx.stroke();
-
-    ctx.fillStyle = TC; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-    ctx.fillText(fmtK(ov[ov.length - 1]), padL + cW + 4, ty(ov[ov.length - 1]) + 3.5);
-  }, [obvVals, visOffset, activeIndicators.obv]);
-
-  // ── Draw CVD ──────────────────────────────────────────────────────────────
-  const drawCVD = useCallback(() => {
-    const el = cvdRef.current;
-    if (!el || !activeIndicators.cvd) return;
-    const { ctx, w, h } = setupCanvas(el);
-    ctx.clearRect(0, 0, w, h);
-    const barSlice = cvdBarDeltas.slice(visOffset);
-    const cumSlice = cvdCumDeltas.slice(visOffset);
-    const n = visCandles.length;
-    if (!barSlice.length || n < 2) return;
-
-    const { cW, cH, cw, padL, padT } = makePaneCoords(w, h, 68, 2, 6, 4, n);
-    const maxBarAbs = Math.max(...barSlice.map(Math.abs), 1);
-    const midY      = padT + cH / 2;
-    const barScale  = (cH / 2) / maxBarAbs;
-    const cumMin    = Math.min(...cumSlice), cumMax = Math.max(...cumSlice);
-    const cumRng    = (cumMax - cumMin) || 1;
-    const tyCum     = (v: number) => padT + (1 - (v - cumMin) / cumRng) * cH;
-
-    ctx.strokeStyle = 'rgba(255,255,255,0.1)'; ctx.lineWidth = 0.5;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(padL, midY); ctx.lineTo(padL + cW, midY); ctx.stroke();
-    ctx.setLineDash([]);
-
-    barSlice.forEach((delta, i) => {
-      const barH = Math.max(1, Math.abs(delta) * barScale);
-      ctx.fillStyle = delta >= 0 ? 'rgba(0,229,160,0.45)' : 'rgba(255,61,90,0.45)';
-      ctx.fillRect(padL + i * cw + 1, delta >= 0 ? midY - barH : midY, Math.max(1, cw - 2), barH);
-    });
-
-    const cumPts = cumSlice.map((v, i) => ({ x: padL + i * cw + cw / 2, y: tyCum(v) }));
-    if (cumPts.length > 1) {
-      ctx.strokeStyle = COL.cvdLine; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
-      ctx.beginPath();
-      cumPts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+      ctx.roundRect?.(bx - 4, by - 11, tw + 12, 17, 3);
+      ctx.fill();
+      ctx.strokeStyle = hexAlpha(col, 0.7);
+      ctx.lineWidth = 0.8;
       ctx.stroke();
+      ctx.fillStyle = col;
+      ctx.textAlign = 'left';
+      ctx.fillText(badge, bx, by);
     }
 
-    const lastCum = cumSlice[cumSlice.length - 1];
-    if (lastCum != null) {
-      ctx.fillStyle = COL.cvdLine; ctx.font = '9px JetBrains Mono, monospace'; ctx.textAlign = 'left';
-      ctx.fillText(fmtK(lastCum), padL + cW + 4, tyCum(lastCum) + 3.5);
+    // ── Fib score badge ───────────────────────────────────────────────────────
+    if (fiboScore.nearestLabel && fiboScore.bonus > 0) {
+      ctx.font = '9px JetBrains Mono, monospace';
+      const label = `Fib ${fiboScore.nearestLabel}`;
+      const tw    = ctx.measureText(label).width;
+      ctx.fillStyle = 'rgba(167,139,255,0.18)';
+      ctx.fillRect(PADDING.left + 6, PADDING.top + 26, tw + 10, 14);
+      ctx.fillStyle = COL.purple;
+      ctx.textAlign = 'left';
+      ctx.fillText(label, PADDING.left + 11, PADDING.top + 37);
     }
-  }, [cvdBarDeltas, cvdCumDeltas, visCandles, visOffset, activeIndicators.cvd]);
 
-  // ── Hover tooltip ─────────────────────────────────────────────────────────
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    const el = overlayRef.current;
-    const tt = ttRef.current;
-    if (!el || !tt) return;
-    const rect = el.getBoundingClientRect();
-    const mx   = e.clientX - rect.left;
-    const n    = visCandles.length;
-    const cW   = rect.width - CHART.padRight - CHART.padLeft;
-    const i    = Math.floor((mx - CHART.padLeft) / (cW / n));
-    if (i < 0 || i >= n) { tt.style.opacity = '0'; hoverIdx.current = -1; drawCrosshair(-1); return; }
-    hoverIdx.current = i;
-    drawCrosshair(i);
+  }, [
+    allCandles, livePrice, e9s, e20s, e50s, bbUpper, bbLower, bbMiddle,
+    vwapVals, vwapUpper1, vwapLower1, vwapUpper2, vwapLower2,
+    stVals, stBull, psarVals, psarBull,
+    patterns, activeIndicators,
+    showVP, showAutoFib, fiboOverlay, divergence, fiboScore,
+    drawings, selectedId, crosshair,
+  ]);
 
-    const c      = visCandles[i];
-    const absIdx = visOffset + i;
-    const chPct  = c.o ? ((c.c - c.o) / c.o * 100).toFixed(2) : '0.00';
-    const col    = c.c >= c.o ? COL.bull : COL.bear;
+  // ── Sub-pane renderers ────────────────────────────────────────────────────
+  const renderSubPane = useCallback((
+    canvas: HTMLCanvasElement,
+    series1: (number | null)[],
+    series2: (number | null)[] | null,
+    type: 'rsi' | 'macd' | 'vol' | 'cvd',
+    startI: number,
+    visCount: number,
+    barW: number,
+  ) => {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width, H = canvas.height;
+    const cs = getComputedStyle(canvas);
+    const green  = cs.getPropertyValue('--green').trim()  || '#00e5a0';
+    const red    = cs.getPropertyValue('--red').trim()    || '#ff3d5a';
+    const blue   = cs.getPropertyValue('--blue').trim()   || '#4da6ff';
+    const amber  = cs.getPropertyValue('--amber').trim()  || '#ffb82e';
+    const bg     = cs.getPropertyValue('--bg2').trim()    || '#0d1017';
+    const border = cs.getPropertyValue('--border').trim() || 'rgba(255,255,255,0.06)';
+    const text3  = cs.getPropertyValue('--text3').trim()  || '#3d4460';
+    const purple = cs.getPropertyValue('--purple').trim() || '#a78bff';
 
-    const rows: [string, string, string?][] = [
-      ['O',   fmtPrice(c.o)],
-      ['H',   fmtPrice(c.h)],
-      ['L',   fmtPrice(c.l)],
-      ['C',   fmtPrice(c.c), col],
-      ['Chg', (c.c >= c.o ? '+' : '') + chPct + '%', col],
-      ['Vol', fmtK(c.v)],
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 0.5;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(W, 0); ctx.stroke();
+
+    const bX = (i: number) => PADDING.left + i * barW + barW / 2;
+
+    if (type === 'rsi') {
+      // RSI + StochRSI
+      const vals = rsiVals.slice(startI, startI + visCount);
+      const sk = stochRsiK.slice(startI, startI + visCount);
+      const sd = stochRsiD.slice(startI, startI + visCount);
+      // Guide lines 30/70
+      [30, 50, 70].forEach(lv => {
+        const y = H - (lv / 100) * H;
+        ctx.strokeStyle = lv === 50 ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.05)';
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W - VP_W, y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = text3;
+        ctx.font = '8px JetBrains Mono, monospace';
+        ctx.textAlign = 'right';
+        ctx.fillText(String(lv), W - VP_W - 2, y - 1);
+      });
+      // RSI line
+      ctx.strokeStyle = amber; ctx.lineWidth = 1.2; ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < vals.length; i++) {
+        const v = vals[i]; if (v == null) continue;
+        const x = bX(i), y = H - (v / 100) * H;
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      // StochK / StochD
+      if (activeIndicators.stochRsi) {
+        const draw = (arr: (number|null)[], col: string) => {
+          ctx.strokeStyle = col; ctx.lineWidth = 0.8; ctx.beginPath();
+          let s = false;
+          for (let i = 0; i < arr.length; i++) {
+            const v = arr[i]; if (v == null) continue;
+            const x = bX(i), y = H - (v / 100) * H;
+            if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        };
+        draw(sk, blue);
+        draw(sd, purple);
+      }
+      // Label
+      ctx.fillStyle = amber; ctx.font = 'bold 8px JetBrains Mono, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('RSI', 4, 10);
+
+      // Divergence marker on RSI sub-pane
+      if (divergence) {
+        const col = divergence.type.includes('bull') ? green : red;
+        const dIdx = divergence.barIdx - startI;
+        if (dIdx >= 0 && dIdx < visCount) {
+          const v = rsiVals[startI + dIdx];
+          if (v != null) {
+            const x = bX(dIdx), y = H - (v / 100) * H;
+            ctx.beginPath();
+            ctx.arc(x, y, 3, 0, Math.PI * 2);
+            ctx.fillStyle = col;
+            ctx.fill();
+          }
+        }
+      }
+
+    } else if (type === 'macd') {
+      const line = macdLine.slice(startI, startI + visCount);
+      const sig  = macdSignal.slice(startI, startI + visCount);
+      const hist = macdHist.slice(startI, startI + visCount);
+      const maxH2 = Math.max(...hist.filter(v => v != null).map(v => Math.abs(v as number)), 0.0001);
+      const midY  = H / 2;
+
+      for (let i = 0; i < hist.length; i++) {
+        const v = hist[i]; if (v == null) continue;
+        const x = bX(i);
+        const bh = (Math.abs(v) / maxH2) * (H / 2 - 4);
+        ctx.fillStyle = v >= 0 ? hexAlpha(green, 0.5) : hexAlpha(red, 0.5);
+        ctx.fillRect(x - barW/2 + 1, v >= 0 ? midY - bh : midY, Math.max(1, barW - 2), bh);
+      }
+      const drawMacdLine = (arr: (number|null)[], col: string) => {
+        ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.beginPath();
+        let s = false;
+        for (let i = 0; i < arr.length; i++) {
+          const v = arr[i]; if (v == null) continue;
+          const x = bX(i), y = midY - (v / maxH2) * (H / 2 - 4);
+          if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      };
+      drawMacdLine(line, blue);
+      drawMacdLine(sig,  red);
+      ctx.strokeStyle = border; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(0, midY); ctx.lineTo(W, midY); ctx.stroke();
+      ctx.fillStyle = blue; ctx.font = 'bold 8px JetBrains Mono, monospace';
+      ctx.textAlign = 'left'; ctx.fillText('MACD', 4, 10);
+
+    } else if (type === 'vol') {
+      const vols = allCandles.slice(startI, startI + visCount).map(c => c.v);
+      const maxV = Math.max(...vols, 1);
+      for (let i = 0; i < vols.length; i++) {
+        const c = allCandles[startI + i];
+        if (!c) continue;
+        const x = bX(i);
+        const bh = (vols[i] / maxV) * (H - 8);
+        ctx.fillStyle = c.c >= c.o ? hexAlpha(green, 0.45) : hexAlpha(red, 0.45);
+        ctx.fillRect(x - barW/2 + 1, H - 4 - bh, Math.max(1, barW - 2), bh);
+      }
+      ctx.fillStyle = green; ctx.font = 'bold 8px JetBrains Mono, monospace';
+      ctx.textAlign = 'left'; ctx.fillText('VOL', 4, 10);
+
+    } else if (type === 'cvd') {
+      const cvd  = cvdCumDeltas.slice(startI, startI + visCount);
+      const bars = cvdBarDeltas.slice(startI, startI + visCount);
+      const min2 = Math.min(...cvd.filter(v => v != null) as number[], 0);
+      const max2 = Math.max(...cvd.filter(v => v != null) as number[], 0.0001);
+      const rng2 = max2 - min2 || 1;
+      const midY = H / 2;
+      ctx.strokeStyle = green; ctx.lineWidth = 1; ctx.beginPath();
+      let s = false;
+      for (let i = 0; i < cvd.length; i++) {
+        const v = cvd[i]; if (v == null) continue;
+        const x = bX(i), y = H - 4 - ((v - min2) / rng2) * (H - 8);
+        if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.strokeStyle = border; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(0, H - 4 - ((0 - min2) / rng2) * (H - 8));
+      ctx.lineTo(W, H - 4 - ((0 - min2) / rng2) * (H - 8)); ctx.stroke();
+      ctx.fillStyle = green; ctx.font = 'bold 8px JetBrains Mono, monospace';
+      ctx.textAlign = 'left'; ctx.fillText('CVD', 4, 10);
+    }
+
+    // Crosshair vertical on sub-pane
+    if (crosshair) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth   = 0.6;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(crosshair.x, 0); ctx.lineTo(crosshair.x, H); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }, [
+    rsiVals, stochRsiK, stochRsiD, activeIndicators,
+    macdLine, macdSignal, macdHist,
+    allCandles, cvdCumDeltas, cvdBarDeltas,
+    divergence, crosshair,
+  ]);
+
+  // ── Trigger redraws ───────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = mainRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const el  = canvas.parentElement;
+    if (el) {
+      const W = el.clientWidth;
+      const H = fullscreen ? window.innerHeight - 220 : 340;
+      canvas.width  = W * dpr;
+      canvas.height = H * dpr;
+      canvas.style.width  = W + 'px';
+      canvas.style.height = H + 'px';
+      canvas.getContext('2d')?.scale(dpr, dpr);
+    }
+    render();
+  }, [render, fullscreen]);
+
+  useEffect(() => {
+    const refs = [
+      { ref: rsiRef,  type: 'rsi'  as const, show: activeIndicators.rsi || activeIndicators.stochRsi },
+      { ref: macdRef, type: 'macd' as const, show: activeIndicators.macd },
+      { ref: volRef,  type: 'vol'  as const, show: activeIndicators.volume },
+      { ref: cvdRef,  type: 'cvd'  as const, show: activeIndicators.cvd },
     ];
 
-    // Indicator values at hover
-    const maybeAdd = (label: string, arr: (number | null | undefined)[], color?: string, fmt?: (v: number) => string) => {
-      const v = arr[absIdx];
-      if (v != null) rows.push([label, fmt ? fmt(v as number) : fmtPrice(v as number), color]);
-    };
+    const canvas = mainRef.current;
+    if (!canvas) return;
 
-    if (activeIndicators.vwap)  maybeAdd('VWAP', vwapVals,   COL.vwap);
-    if (activeIndicators.ema9)  maybeAdd('E9',   e9s,        COL.ema9);
-    if (activeIndicators.ema20) maybeAdd('E20',  e20s,       COL.ema20);
-    if (activeIndicators.ema50) maybeAdd('E50',  e50s,       COL.ema50);
-    if (activeIndicators.bb) {
-      maybeAdd('BB↑', bbUpper,  COL.bb);
-      maybeAdd('BB↓', bbLower,  COL.bb);
+    const chartW   = canvas.clientWidth;
+    const barW     = coordRef.current.barW || 8;
+    const visCount = Math.floor((chartW - PADDING.left - PADDING.right - VP_W) / barW);
+    const startI   = coordRef.current.offset || 0;
+    const dpr      = window.devicePixelRatio || 1;
+
+    for (const { ref, type, show } of refs) {
+      const c = ref.current;
+      if (!c || !show) continue;
+      if (c.width !== chartW * dpr) {
+        c.width  = chartW * dpr;
+        c.height = SUB_H * dpr;
+        c.style.width  = chartW + 'px';
+        c.style.height = SUB_H + 'px';
+        c.getContext('2d')?.scale(dpr, dpr);
+      }
+      renderSubPane(c, rsiVals, stochRsiK, type, startI, visCount, barW);
     }
-    if (activeIndicators.superTrend) maybeAdd('ST', stVals, stBull[absIdx] ? COL.superTrendBull : COL.superTrendBear);
-    if (activeIndicators.rsi)       maybeAdd('RSI',  rsiVals,  COL.rsi,   v => String(Math.round(v)));
-    if (activeIndicators.macd) {
-      maybeAdd('MACD',  macdLine,   COL.macdLine,  v => v.toFixed(4));
-      maybeAdd('Sig',   macdSignal, COL.macdSig,   v => v.toFixed(4));
-      maybeAdd('Hist',  macdHist,   undefined,     v => v.toFixed(4));
+  }, [renderSubPane, activeIndicators, rsiVals, stochRsiK]);
+
+  // ── Mouse handlers on main canvas ─────────────────────────────────────────
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = mainRef.current;
+    if (!canvas) return;
+    const rect   = canvas.getBoundingClientRect();
+    const px     = (e.clientX - rect.left);
+    const py     = (e.clientY - rect.top);
+    const price  = pixToPrice(py, canvas.clientHeight);
+    const barIdx = pixToBar(px);
+    setCrosshair({ x: px, barIdx, price });
+  }, []);
+
+  const handleMouseLeave = useCallback(() => setCrosshair(null), []);
+
+  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = mainRef.current;
+    if (!canvas) return;
+    const rect   = canvas.getBoundingClientRect();
+    const px     = (e.clientX - rect.left);
+    const py     = (e.clientY - rect.top);
+    const price  = pixToPrice(py, canvas.clientHeight);
+    const barIdx = pixToBar(px);
+
+    if (!activeTool) {
+      // Check hit on existing drawing
+      const hit = drawings.find(d => {
+        if (d.kind === 'hline') return Math.abs(priceToPix(d.price, canvas.clientHeight) - py) < 6;
+        return false;
+      });
+      setSelectedId(hit?.id ?? null);
+      return;
     }
-    if (activeIndicators.stochRsi) {
-      maybeAdd('SK', stochRsiK, COL.stochK, v => v.toFixed(1));
-      maybeAdd('SD', stochRsiD, COL.stochD, v => v.toFixed(1));
+
+    if (!activeDraw) {
+      // First click — start
+      setActiveDraw({
+        kind: activeTool, startX: px, startY: py,
+        startPrice: price, startBarIdx: barIdx,
+      });
+      if (activeTool === 'hline') {
+        setDrawings(ds => [...ds, makeHLine(price)]);
+        setActiveDraw(null);
+      }
+    } else {
+      // Second click — finish
+      if (activeDraw.kind === 'trendline') {
+        setDrawings(ds => [...ds, makeTrendLine(activeDraw.startBarIdx, activeDraw.startPrice, barIdx, price)]);
+      } else if (activeDraw.kind === 'fib') {
+        setDrawings(ds => [...ds, makeFibDrawing(activeDraw.startBarIdx, activeDraw.startPrice, barIdx, price)]);
+      } else if (activeDraw.kind === 'rect') {
+        setDrawings(ds => [...ds, makeRect(activeDraw.startBarIdx, activeDraw.startPrice, barIdx, price)]);
+      }
+      setActiveDraw(null);
     }
-    if (activeIndicators.adx) {
-      maybeAdd('ADX',  adxVals, COL.adx,     v => v.toFixed(1));
-      maybeAdd('+DI',  plusDI,  COL.plusDI,  v => v.toFixed(1));
-      maybeAdd('-DI',  minusDI, COL.minusDI, v => v.toFixed(1));
-    }
-    if (activeIndicators.williamsR) maybeAdd('%R',  willRVals, COL.willR, v => v.toFixed(1));
-    if (activeIndicators.cci)       maybeAdd('CCI', cciVals,   COL.cci,   v => v.toFixed(1));
-    if (activeIndicators.cvd) {
-      const bd = cvdBarDeltas[absIdx];
-      const cd = cvdCumDeltas[absIdx];
-      if (bd != null) rows.push(['ΔVol', (bd >= 0 ? '+' : '') + fmtK(bd), bd >= 0 ? COL.bull : COL.bear]);
-      if (cd != null) rows.push(['CVD',  (cd >= 0 ? '+' : '') + fmtK(cd), COL.cvdLine]);
-    }
+  }, [activeTool, activeDraw, drawings, priceToPix, pixToBar, pixToPrice]);
 
-    // Pattern labels
-    const pats = patterns[absIdx];
-    if (pats?.length) rows.push(['Pat', pats.map(p => p.name).join(', ')]);
+  // ── Scroll wheel — load history ───────────────────────────────────────────
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (e.deltaX < -40) loadOlderPage();
+  }, [loadOlderPage]);
 
-    tt.innerHTML = rows.map(([label, value, color]) =>
-      `<div style="display:flex;justify-content:space-between;gap:12px;line-height:1.7">
-        <span style="color:var(--text3)">${label}</span>
-        <span style="font-weight:600${color ? `;color:${color}` : ''}">${value}</span>
-      </div>`
-    ).join('');
+  // ── MTF confluence data ───────────────────────────────────────────────────
+  const mtfConfluence = calcMTFConfluence(mtfSignals);
+  const confColor: Record<string, string> = {
+    strong_bull: 'var(--green)',
+    weak_bull:   'rgba(0,229,160,0.55)',
+    neutral:     'var(--text2)',
+    weak_bear:   'rgba(255,61,90,0.55)',
+    strong_bear: 'var(--red)',
+  };
+  const confLabel: Record<string, string> = {
+    strong_bull: '▲ STRONG BULL',
+    weak_bull:   '△ WEAK BULL',
+    neutral:     '— NEUTRAL',
+    weak_bear:   '▽ WEAK BEAR',
+    strong_bear: '▼ STRONG BEAR',
+  };
 
-    tt.style.opacity = '1';
-    tt.style.left    = Math.min(mx + 8, rect.width - 160) + 'px';
-    tt.style.top     = Math.max(e.clientY - rect.top - 80, 4) + 'px';
-  }, [visCandles, visOffset, e9s, e20s, e50s, rsiVals, stochRsiK, stochRsiD,
-      macdLine, macdSignal, macdHist, bbUpper, bbLower, stVals, stBull,
-      adxVals, plusDI, minusDI, willRVals, cciVals, vwapVals,
-      cvdBarDeltas, cvdCumDeltas, patterns, activeIndicators, drawCrosshair]);
+  // ── Layout ────────────────────────────────────────────────────────────────
+  const containerStyle: React.CSSProperties = fullscreen
+    ? { position: 'fixed', inset: 0, zIndex: 900, background: 'var(--bg)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+    : { position: 'relative' };
 
-  const handleMouseLeave = useCallback(() => {
-    if (ttRef.current) ttRef.current.style.opacity = '0';
-    hoverIdx.current = -1; drawCrosshair(-1);
-  }, [drawCrosshair]);
-
-  // ── Effects ───────────────────────────────────────────────────────────────
-  useEffect(() => {
-    drawPrice(); drawMACD(); drawRSI(); drawStochRSI();
-    drawADX(); drawWillR(); drawCCI(); drawVol(); drawOBV(); drawCVD();
-  }, [drawPrice, drawMACD, drawRSI, drawStochRSI, drawADX, drawWillR, drawCCI, drawVol, drawOBV, drawCVD]);
-
-  useEffect(() => {
-    const handler = () => {
-      drawPrice(); drawMACD(); drawRSI(); drawStochRSI();
-      drawADX(); drawWillR(); drawCCI(); drawVol(); drawOBV(); drawCVD();
-    };
-    window.addEventListener('resize', handler);
-    return () => window.removeEventListener('resize', handler);
-  }, [drawPrice, drawMACD, drawRSI, drawStochRSI, drawADX, drawWillR, drawCCI, drawVol, drawOBV, drawCVD]);
-
-  // ── Derived display values ─────────────────────────────────────────────────
-  const latestRSI = useMemo(
-    () => rsiVals.filter(v => v !== null).slice(-1)[0] as number | undefined,
-    [rsiVals],
-  );
-  const rsiColor = latestRSI !== undefined
-    ? (latestRSI > 70 ? COL.bear : latestRSI < 30 ? COL.bull : COL.rsi)
-    : COL.rsi;
-
-  const latestVWAP = useMemo(
-    () => vwapVals.filter(v => v != null).slice(-1)[0] as number | undefined,
-    [vwapVals],
-  );
-
-  const latestCVD = useMemo(
-    () => cvdCumDeltas[cvdCumDeltas.length - 1],
-    [cvdCumDeltas],
-  );
-
-  const latestMACD = useMemo(
-    () => macdLine.filter(v => v != null).slice(-1)[0] as number | undefined,
-    [macdLine],
-  );
-
-  const latestADX = useMemo(
-    () => adxVals.filter(v => v != null).slice(-1)[0] as number | undefined,
-    [adxVals],
-  );
-
-  const stackLabel = useMemo(() => {
-    if (e9 === null || e20 === null || e50 === null) return null;
-    if (e9 > e20 && e20 > e50) return { text: '▲ BULLISH', color: COL.bull, bg: 'rgba(0,229,160,0.1)' };
-    if (e9 < e20 && e20 < e50) return { text: '▼ BEARISH', color: COL.bear, bg: 'rgba(255,61,90,0.1)' };
-    return { text: '⚠ TANGLED', color: '#ffb82e', bg: 'rgba(255,184,46,0.1)' };
-  }, [e9, e20, e50]);
-
-  const lastVol = visCandles[visCandles.length - 1]?.v || 0;
-  const avgVol  = useMemo(
-    () => visCandles.length ? visCandles.reduce((a, c) => a + c.v, 0) / visCandles.length : 0,
-    [visCandles],
-  );
-
-  // Active pane count (for layout)
-  const activePanes = [
-    activeIndicators.macd,
-    activeIndicators.rsi,
-    activeIndicators.stochRsi,
-    activeIndicators.adx,
-    activeIndicators.williamsR,
-    activeIndicators.cci,
-    activeIndicators.volume,
-    activeIndicators.obv,
-    activeIndicators.cvd,
-  ].filter(Boolean).length;
-
-  // ── Pane label helper ──────────────────────────────────────────────────────
-  const paneLabel = (
-    title: string,
-    right?: { val: string | number | undefined; col?: string },
-    right2?: { val: string | number | undefined; col?: string },
-  ) => (
-    <div style={{
-      fontSize: 9, fontFamily: 'var(--mono)', fontWeight: 600, color: 'var(--text3)',
-      letterSpacing: '.08em', textTransform: 'uppercase',
-      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-      margin: '6px 0 3px', padding: '0 2px',
-    }}>
-      <span>{title}</span>
-      <span style={{ display: 'flex', gap: 10 }}>
-        {right2 && <span style={{ color: right2.col ?? 'var(--text3)' }}>{right2.val ?? '—'}</span>}
-        {right  && <span style={{ color: right.col  ?? 'var(--text3)' }}>{right.val  ?? '—'}</span>}
-      </span>
-    </div>
-  );
-
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div style={{
-      background: 'var(--bg2)', border: '1px solid var(--border)',
-      borderRadius: 'var(--radius)', padding: 10, marginBottom: 10, position: 'relative',
-    }}>
+    <div ref={wrapRef} style={containerStyle}>
 
-      {/* ── Legend + Indicator toggle ──────────────────────── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-        {activeIndicators.ema9 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: COL.ema9 }} />
-            EMA{useStore.getState().indicatorParams.ema9Period} <span style={{ color: 'var(--text)', fontWeight: 600 }}>{e9 !== null ? fmtPrice(e9) : '—'}</span>
-          </div>
+      {/* ── Toolbar ─────────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap',
+        padding: '6px 10px', background: 'var(--bg2)', borderRadius: fullscreen ? 0 : 'var(--radius) var(--radius) 0 0',
+        border: '1px solid var(--border)', borderBottom: 'none',
+      }}>
+        {/* Fullscreen */}
+        <button
+          onClick={() => setFullscreen(f => !f)}
+          title="Fullscreen (F)"
+          style={tbBtn(fullscreen)}
+        >
+          {fullscreen ? '⊠' : '⛶'}
+        </button>
+
+        <div style={{ width: 1, height: 14, background: 'var(--border2)', margin: '0 2px' }} />
+
+        {/* Volume Profile */}
+        <button onClick={() => setShowVP(v => !v)} style={tbBtn(showVP)} title="Volume Profile">VP</button>
+
+        {/* Auto Fib */}
+        <button onClick={() => setShowAutoFib(v => !v)} style={tbBtn(showAutoFib)} title="Auto Fibonacci">𝑓</button>
+
+        <div style={{ width: 1, height: 14, background: 'var(--border2)', margin: '0 2px' }} />
+
+        {/* Drawing tools */}
+        {(['hline','trendline','fib','rect'] as DrawingToolKind[]).map(k => (
+          <button
+            key={k}
+            onClick={() => setActiveTool(t => t === k ? null : k)}
+            title={TOOL_DEFAULTS[k].label}
+            style={tbBtn(activeTool === k)}
+          >
+            {TOOL_DEFAULTS[k].icon}
+          </button>
+        ))}
+
+        {drawings.length > 0 && (
+          <button
+            onClick={() => { setDrawings([]); setSelectedId(null); }}
+            title="Clear all drawings"
+            style={tbBtn(false, 'var(--red)')}
+          >
+            ✕
+          </button>
         )}
-        {activeIndicators.ema20 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: COL.ema20 }} />
-            EMA{useStore.getState().indicatorParams.ema20Period} <span style={{ color: 'var(--text)', fontWeight: 600 }}>{e20 !== null ? fmtPrice(e20) : '—'}</span>
-          </div>
-        )}
-        {activeIndicators.ema50 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: COL.ema50 }} />
-            EMA{useStore.getState().indicatorParams.ema50Period} <span style={{ color: 'var(--text)', fontWeight: 600 }}>{e50 !== null ? fmtPrice(e50) : '—'}</span>
-          </div>
-        )}
-        {activeIndicators.vwap && latestVWAP != null && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            <div style={{ width: 14, height: 2, background: COL.vwap, borderRadius: 1 }} />
-            VWAP <span style={{ color: COL.vwap, fontWeight: 600 }}>{fmtPrice(latestVWAP)}</span>
-          </div>
-        )}
-        {activeIndicators.macd && latestMACD != null && (
-          <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            MACD <span style={{ color: latestMACD >= 0 ? COL.bull : COL.bear, fontWeight: 600 }}>{latestMACD.toFixed(4)}</span>
-          </div>
-        )}
-        {activeIndicators.adx && latestADX != null && (
-          <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text2)' }}>
-            ADX <span style={{ color: latestADX > 25 ? COL.adx : 'var(--text3)', fontWeight: 600 }}>{latestADX.toFixed(1)}</span>
-          </div>
-        )}
-        {stackLabel && (
+
+        <div style={{ width: 1, height: 14, background: 'var(--border2)', margin: '0 2px' }} />
+
+        {/* Load older history */}
+        <button
+          onClick={loadOlderPage}
+          disabled={loadingHistory}
+          title="Load 200 older candles"
+          style={tbBtn(false)}
+        >
+          {loadingHistory ? '…' : '←+200'}
+        </button>
+
+        <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)', marginLeft: 4 }}>
+          {allCandles.length} bars
+        </span>
+
+        {/* Fib score badge */}
+        {fiboScore.nearestLabel && (
           <span style={{
-            marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700,
-            padding: '3px 10px', borderRadius: 20, letterSpacing: '.04em',
-            color: stackLabel.color, background: stackLabel.bg,
+            marginLeft: 6, fontSize: 9, fontFamily: 'var(--mono)',
+            padding: '2px 7px', borderRadius: 10,
+            background: 'rgba(167,139,255,0.12)', color: 'var(--purple)',
+            border: '1px solid rgba(167,139,255,0.25)',
           }}>
-            {stackLabel.text}
+            Fib {fiboScore.nearestLabel} +{fiboScore.bonus}pt
           </span>
         )}
 
-        {/* Indicator panel toggle */}
-        <button
-          onClick={() => setShowPanel(true)}
+        {/* Divergence badge */}
+        {divergence && (
+          <span style={{
+            marginLeft: 4, fontSize: 9, fontFamily: 'var(--mono)',
+            padding: '2px 7px', borderRadius: 10,
+            background: divergence.type.includes('bull') ? 'var(--green-bg)' : 'var(--red-bg)',
+            color: divergence.type.includes('bull') ? 'var(--green)' : 'var(--red)',
+            border: `1px solid ${divergence.type.includes('bull') ? 'var(--green)' : 'var(--red)'}44`,
+          }}>
+            {divergence.label} RSI={divergence.rsi?.toFixed(0)}
+          </span>
+        )}
+
+        <span style={{ marginLeft: 'auto', fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+          {activeTool ? `Drawing: ${TOOL_DEFAULTS[activeTool].label} — click to place` : 'F=fullscreen  ← scroll=history  Del=erase'}
+        </span>
+      </div>
+
+      {/* ── Main canvas ─────────────────────────────────────────────────── */}
+      <div style={{ position: 'relative', lineHeight: 0 }}>
+        <canvas
+          ref={mainRef}
           style={{
-            marginLeft: stackLabel ? 6 : 'auto',
-            fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
-            padding: '4px 10px', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
-            border: '1px solid var(--border2)', background: 'var(--bg3)', color: 'var(--text2)',
-            display: 'flex', alignItems: 'center', gap: 5, transition: 'all .15s',
+            width: '100%',
+            height: fullscreen ? 'calc(100vh - 220px)' : 340,
+            display: 'block',
+            background: 'var(--bg2)',
+            cursor: activeTool ? 'crosshair' : 'default',
+            border: '1px solid var(--border)',
+            borderBottom: 'none',
           }}
-        >
-          ⚙ Indicators
-        </button>
+          onMouseMove={handleMouseMove}
+          onMouseLeave={handleMouseLeave}
+          onClick={handleClick}
+          onWheel={handleWheel}
+        />
       </div>
 
-      {/* ── Price canvas ──────────────────────────────────── */}
-      <div style={{ position: 'relative' }}>
-        <canvas ref={priceRef}   style={{ height: 240, width: '100%', borderRadius: 'var(--radius-sm)', display: 'block' }} />
-        <canvas ref={overlayRef} style={{ position: 'absolute', inset: 0, height: 240, width: '100%', cursor: 'crosshair' }}
+      {/* ── Sub-panes ────────────────────────────────────────────────────── */}
+      {(activeIndicators.rsi || activeIndicators.stochRsi) && (
+        <canvas ref={rsiRef}  style={{ width: '100%', height: SUB_H, display: 'block', border: '1px solid var(--border)', borderBottom: 'none', cursor: 'default' }}
           onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave} />
+      )}
+      {activeIndicators.macd && (
+        <canvas ref={macdRef} style={{ width: '100%', height: SUB_H, display: 'block', border: '1px solid var(--border)', borderBottom: 'none', cursor: 'default' }}
+          onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave} />
+      )}
+      {activeIndicators.volume && (
+        <canvas ref={volRef}  style={{ width: '100%', height: SUB_H, display: 'block', border: '1px solid var(--border)', borderBottom: 'none', cursor: 'default' }}
+          onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave} />
+      )}
+      {activeIndicators.cvd && (
+        <canvas ref={cvdRef}  style={{ width: '100%', height: SUB_H, display: 'block', border: '1px solid var(--border)', cursor: 'default' }}
+          onMouseMove={handleMouseMove} onMouseLeave={handleMouseLeave} />
+      )}
+
+      {/* ── Multi-TF Confluence Card ─────────────────────────────────────── */}
+      <div style={{
+        background: 'var(--bg2)', border: '1px solid var(--border)',
+        borderTop: 'none', borderRadius: '0 0 var(--radius) var(--radius)',
+        padding: '10px 14px',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--text2)', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+            MTF Confluence
+          </span>
+          {mtfLoading ? (
+            <span style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>loading…</span>
+          ) : (
+            <>
+              <span style={{
+                fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700,
+                color: confColor[mtfConfluence.confluence],
+                padding: '2px 8px', borderRadius: 10,
+                background: `${confColor[mtfConfluence.confluence]}18`,
+                border: `1px solid ${confColor[mtfConfluence.confluence]}44`,
+              }}>
+                {confLabel[mtfConfluence.confluence]}
+              </span>
+
+              {mtfSignals.map(s => (
+                <div key={s.tf} style={{
+                  display: 'flex', alignItems: 'center', gap: 4,
+                  padding: '3px 9px', borderRadius: 8,
+                  background: s.trend === 'bull' ? 'var(--green-bg)'
+                            : s.trend === 'bear' ? 'var(--red-bg)'
+                            : 'var(--bg3)',
+                  border: `1px solid ${
+                    s.trend === 'bull' ? 'rgba(0,229,160,0.2)'
+                  : s.trend === 'bear' ? 'rgba(255,61,90,0.2)'
+                  : 'var(--border)'}`,
+                }}>
+                  <span style={{ fontSize: 9, fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--text3)' }}>{s.tf}</span>
+                  <span style={{
+                    fontSize: 10, fontFamily: 'var(--mono)',
+                    color: s.trend === 'bull' ? 'var(--green)' : s.trend === 'bear' ? 'var(--red)' : 'var(--text2)',
+                  }}>
+                    {s.trend === 'bull' ? '▲' : s.trend === 'bear' ? '▼' : '—'}
+                  </span>
+                  {s.rsi != null && (
+                    <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+                      {s.rsi}
+                    </span>
+                  )}
+                </div>
+              ))}
+
+              <button
+                onClick={loadMTF}
+                style={{ marginLeft: 'auto', fontSize: 9, fontFamily: 'var(--mono)', padding: '2px 8px', borderRadius: 6, cursor: 'pointer', border: '1px solid var(--border2)', background: 'var(--bg3)', color: 'var(--text3)' }}
+              >
+                ↺
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Tooltip */}
-      <div ref={ttRef} style={{
-        position: 'absolute', pointerEvents: 'none', zIndex: 10,
-        background: 'var(--bg4)', border: '1px solid var(--border3)',
-        borderRadius: 'var(--radius-sm)', padding: '7px 10px',
-        fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--text)',
-        whiteSpace: 'nowrap', opacity: 0, transition: 'opacity .1s',
-        minWidth: 140, boxShadow: '0 4px 20px rgba(0,0,0,.5)',
-      }} />
-
-      {/* ── MACD pane ──────────────────────────────────────── */}
-      {activeIndicators.macd && (
-        <>
-          {paneLabel('MACD',
-            { val: latestMACD != null ? latestMACD.toFixed(4) : undefined, col: latestMACD != null ? (latestMACD >= 0 ? COL.bull : COL.bear) : undefined }
-          )}
-          <canvas ref={macdRef} style={{ height: 70, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── RSI pane ───────────────────────────────────────── */}
-      {activeIndicators.rsi && (
-        <>
-          {paneLabel('RSI (14) · Wilder', { val: latestRSI, col: rsiColor })}
-          <canvas ref={rsiRef} style={{ height: 70, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── Stoch RSI pane ─────────────────────────────────── */}
-      {activeIndicators.stochRsi && (
-        <>
-          {paneLabel('Stoch RSI',
-            { val: stochRsiK.filter(v => v != null).slice(-1)[0]?.toFixed(1), col: COL.stochK },
-            { val: stochRsiD.filter(v => v != null).slice(-1)[0]?.toFixed(1), col: COL.stochD }
-          )}
-          <canvas ref={stochRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── ADX pane ───────────────────────────────────────── */}
-      {activeIndicators.adx && (
-        <>
-          {paneLabel('ADX · Trend Strength',
-            { val: latestADX?.toFixed(1), col: COL.adx }
-          )}
-          <canvas ref={adxRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── Williams %R pane ───────────────────────────────── */}
-      {activeIndicators.williamsR && (
-        <>
-          {paneLabel('Williams %R',
-            { val: willRVals.filter(v => v != null).slice(-1)[0]?.toFixed(1), col: COL.willR }
-          )}
-          <canvas ref={willRRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── CCI pane ───────────────────────────────────────── */}
-      {activeIndicators.cci && (
-        <>
-          {paneLabel('CCI',
-            { val: cciVals.filter(v => v != null).slice(-1)[0]?.toFixed(1), col: COL.cci }
-          )}
-          <canvas ref={cciRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── Volume pane ────────────────────────────────────── */}
-      {activeIndicators.volume && (
-        <>
-          {paneLabel('Volume',
-            { val: 'cur ' + fmtK(lastVol) + ' · avg ' + fmtK(avgVol) }
-          )}
-          <canvas ref={volRef} style={{ height: 52, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── OBV pane ───────────────────────────────────────── */}
-      {activeIndicators.obv && (
-        <>
-          {paneLabel('OBV · On-Balance Volume',
-            { val: obvVals.length ? fmtK(obvVals[obvVals.length - 1]) : undefined, col: COL.obv }
-          )}
-          <canvas ref={obvRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── CVD pane ───────────────────────────────────────── */}
-      {activeIndicators.cvd && (
-        <>
-          {paneLabel('CVD · Cumul. Vol Delta',
-            { val: latestCVD != null ? (latestCVD >= 0 ? '+' : '') + fmtK(latestCVD) : undefined,
-              col: latestCVD != null ? (latestCVD >= 0 ? COL.bull : COL.bear) : undefined }
-          )}
-          <canvas ref={cvdRef} style={{ height: 60, width: '100%', borderRadius: 'var(--radius-sm)' }} />
-        </>
-      )}
-
-      {/* ── Indicator Panel (slide-in) ─────────────────────── */}
-      {showPanel && <IndicatorPanel onClose={() => setShowPanel(false)} />}
     </div>
   );
+}
+
+// ── Toolbar button helper ─────────────────────────────────────────────────────
+function tbBtn(active: boolean, color?: string): React.CSSProperties {
+  return {
+    padding: '3px 8px', fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+    borderRadius: 5, cursor: 'pointer',
+    border: `1px solid ${active ? 'var(--border2)' : 'var(--border)'}`,
+    background: active ? 'var(--bg3)' : 'transparent',
+    color: color ?? (active ? 'var(--text)' : 'var(--text3)'),
+    transition: 'all .12s',
+  };
 }

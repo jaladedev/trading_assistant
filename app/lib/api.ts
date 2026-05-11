@@ -21,7 +21,7 @@ const OKX_TF: Record<string, string> = {
 
 interface ApiDef {
   name: string;
-  klines: (sym: string, tf: string) => string;
+  klines: (sym: string, tf: string, limit?: number, endTime?: number) => string;
   ticker: (sym: string) => string;
   parseKlines: (data: unknown) => Candle[];
   parseTicker: (data: unknown, sym: string) => number;
@@ -30,7 +30,7 @@ interface ApiDef {
 const APIS: ApiDef[] = [
   {
     name: 'Binance',
-    klines: (s, t) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
+    klines: (s, t, limit = 200, endTime?: number) => `https://api.binance.com/api/v3/klines?symbol=${s}&interval=${t}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}`,
     ticker: (s) =>    `https://api.binance.com/api/v3/ticker/price?symbol=${s}`,
     parseKlines: (d) =>
       (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
@@ -39,9 +39,9 @@ const APIS: ApiDef[] = [
   {
     name: 'Bybit',
     // Bybit V5 market klines — category=spot for spot pairs
-    klines: (s, t) => {
+    klines: (s, t, limit = 200, endTime?: number) => {
       const interval = BYBIT_TF[t] ?? '5';
-      return `https://api.bybit.com/v5/market/kline?category=spot&symbol=${s}&interval=${interval}&limit=100`;
+      return `https://api.bybit.com/v5/market/kline?category=spot&symbol=${s}&interval=${interval}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}`;
     },
     ticker: (s) =>
       `https://api.bybit.com/v5/market/tickers?category=spot&symbol=${s}`,
@@ -69,10 +69,10 @@ const APIS: ApiDef[] = [
   {
     name: 'OKX',
     // OKX uses instId format with a hyphen: BTC-USDT instead of BTCUSDT
-    klines: (s, t) => {
+    klines: (s, t, limit = 200, endTime?: number) => {
       const instId = s.replace(/^([A-Z]+)(USDT)$/, '$1-USDT');
       const bar = OKX_TF[t] ?? '5m';
-      return `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=100`;
+      return `https://www.okx.com/api/v5/market/candles?instId=${instId}&bar=${bar}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}`;
     },
     ticker: (s) => {
       const instId = s.replace(/^([A-Z]+)(USDT)$/, '$1-USDT');
@@ -101,7 +101,7 @@ const APIS: ApiDef[] = [
   },
   {
     name: 'MEXC',
-    klines: (s, t) => `https://api.mexc.com/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
+    klines: (s, t, limit = 200, endTime?: number) => `https://api.mexc.com/api/v3/klines?symbol=${s}&interval=${t}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}`,
     ticker: (s) =>    `https://api.mexc.com/api/v3/ticker/price?symbol=${s}`,
     parseKlines: (d) =>
       // MEXC kline format mirrors Binance: [openTime, open, high, low, close, volume, ...]
@@ -110,7 +110,7 @@ const APIS: ApiDef[] = [
   },
   {
     name: 'Binance US',
-    klines: (s, t) => `https://api.binance.us/api/v3/klines?symbol=${s}&interval=${t}&limit=100`,
+    klines: (s, t, limit = 200, endTime?: number) => `https://api.binance.us/api/v3/klines?symbol=${s}&interval=${t}&limit=${limit}${endTime ? `&endTime=${endTime}` : ''}`,
     ticker: (s) =>    `https://api.binance.us/api/v3/ticker/price?symbol=${s}`,
     parseKlines: (d) =>
       (d as string[][]).map(k => ({ o:+k[1], h:+k[2], l:+k[3], c:+k[4], v:+k[5], t:+k[0] })),
@@ -151,14 +151,19 @@ async function tryFetch(url: string): Promise<unknown> {
 
 let activeApiIdx = 0;
 
-export async function fetchKlines(symbol: string, timeframe: string): Promise<Candle[] | null> {
+export async function fetchKlines(
+  symbol: string,
+  timeframe: string,
+  limit = 200,
+  endTime?: number,
+): Promise<Candle[] | null> {
   for (let i = 0; i < APIS.length; i++) {
     const api = APIS[(activeApiIdx + i) % APIS.length];
     try {
-      const data = await tryFetch(api.klines(symbol, timeframe));
+      const url  = api.klines(symbol, timeframe, limit, endTime);
+      const data = await tryFetch(url);
       activeApiIdx = (activeApiIdx + i) % APIS.length;
       const candles = api.parseKlines(data);
-      // Sanity check: reject empty or obviously bad responses
       if (candles.length === 0 || candles.some(c => isNaN(c.c) || c.c <= 0)) throw new Error('bad data');
       return candles;
     } catch { /* try next */ }

@@ -653,6 +653,7 @@ export function scoreEntryQuality(
   e50: number,
   price: number,
   crossovers: CrossoverEvent[],
+  fiboBonus = 0,   // ← Fibonacci proximity bonus (0-20)
 ): { score: number; label: string; cls: string; factors: string[] } {
   let score = 0;
   const factors: string[] = [];
@@ -687,6 +688,11 @@ export function scoreEntryQuality(
     if (recent.type === 'bear' && dir === 'short' && age < 30) { score += 25; factors.push('Fresh bear cross'); }
   }
 
+  
+  if (fiboBonus > 0) {
+    score += fiboBonus;
+    factors.push(`Near Fib level (+${fiboBonus})`);
+  }
   score = Math.max(0, Math.min(100, score));
 
   let label: string, cls: string;
