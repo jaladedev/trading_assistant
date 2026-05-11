@@ -18,7 +18,7 @@ const TAB_KEYS: Record<string, string> = {
 // Mount once at root. Handles all global shortcuts except Cmd+K (done in palette).
 export function useKeyboardShortcuts(
   onOpenPalette: () => void,
-  symbolInputRef?: React.RefObject<HTMLInputElement>,
+  symbolInputRef?: React.RefObject<HTMLInputElement | null>,
 ) {
   const { setTf } = useStore();
 

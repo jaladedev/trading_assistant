@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { fetchKlines, fetchTicker, TF_MS } from '@/lib/api';
 import CandleChart from '@/components/chart/CandleChart';
@@ -11,36 +11,40 @@ import RRCard from '@/components/calculator/RRCard';
 import FuturesCard from '@/components/calculator/FuturesCard';
 import GoalCard from '@/components/calculator/GoalCard';
 import TradeLog from '@/components/journal/TradeLog';
+import StrategyBuilder from '@/components/strategy/StrategyBuilder';
+import CommandPalette, { useKeyboardShortcuts } from '@/components/ui/CommandPalette';
+import { useTheme } from '@/components/ui/ThemeToggle';
+import { toast } from '@/components/ui/Toast';
 import { fmtPrice, fmtSymDisplay } from '@/lib/indicators';
-import { useState } from 'react';
 
 // ── Symbol catalogue ──────────────────────────────────────────────────────────
-const PRESET_SYMS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'BNBUSDT', 'TONUSDT'];
+const PRESET_SYMS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT','TONUSDT'];
 
 const ALL_SYMS = [
-  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'TONUSDT',
-  'ADAUSDT', 'AVAXUSDT', 'DOGEUSDT', 'TRXUSDT', 'LINKUSDT', 'DOTUSDT',
-  'MATICUSDT', 'LTCUSDT', 'BCHUSDT', 'UNIUSDT', 'ATOMUSDT', 'NEARUSDT',
-  'APTUSDT', 'OPUSDT', 'ARBUSDT', 'INJUSDT', 'SUIUSDT', 'SEIUSDT',
-  'SANDUSDT', 'MANAUSDT', 'AAVEUSDT', 'COMPUSDT', 'SNXUSDT', 'MKRUSDT',
-  'RUNEUSDT', 'FTMUSDT', 'ALGOUSDT', 'ICPUSDT', 'FILUSDT', 'HBARUSDT',
-  'EGLDUSDT', 'FLOWUSDT', 'AXSUSDT', 'GALAUSDT', 'APEUSDT', 'WOOUSDT',
-  'RENDERUSDT', 'FETUSDT', 'AGIXUSDT', 'OCEANUSDT', 'TAOUSDT',
-  'ETHBTC', 'BNBBTC', 'PEPEUSDT', 'FLOKIUSDT', 'SHIBUSDT',
+  'BTCUSDT','ETHUSDT','BNBUSDT','SOLUSDT','XRPUSDT','TONUSDT',
+  'ADAUSDT','AVAXUSDT','DOGEUSDT','TRXUSDT','LINKUSDT','DOTUSDT',
+  'MATICUSDT','LTCUSDT','BCHUSDT','UNIUSDT','ATOMUSDT','NEARUSDT',
+  'APTUSDT','OPUSDT','ARBUSDT','INJUSDT','SUIUSDT','SEIUSDT',
+  'SANDUSDT','MANAUSDT','AAVEUSDT','COMPUSDT','SNXUSDT','MKRUSDT',
+  'RUNEUSDT','FTMUSDT','ALGOUSDT','ICPUSDT','FILUSDT','HBARUSDT',
+  'EGLDUSDT','FLOWUSDT','AXSUSDT','GALAUSDT','APEUSDT','WOOUSDT',
+  'RENDERUSDT','FETUSDT','AGIXUSDT','OCEANUSDT','TAOUSDT',
+  'ETHBTC','BNBBTC','PEPEUSDT','FLOKIUSDT','SHIBUSDT',
 ];
 
-const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'];
+const TIMEFRAMES = ['1m','5m','15m','1h','4h','1d'];
 type Tab = 'chart' | 'calc' | 'journal' | 'strategy';
 
 const STATUS_COLOR: Record<string, string> = {
-  idle: '#6b7591',
-  live: '#00e5a0',
-  warn: '#ffb82e',
-  err:  '#ff3d5a',
+  idle: '#6b7591', live: '#00e5a0', warn: '#ffb82e', err: '#ff3d5a',
 };
 
 // ── SymbolSearch ──────────────────────────────────────────────────────────────
-function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) => void }) {
+function SymbolSearch({ sym, onSelect, inputRef }: {
+  sym:      string;
+  onSelect: (s: string) => void;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
+}) {
   const [query, setQuery]   = useState('');
   const [open, setOpen]     = useState(false);
   const [cursor, setCursor] = useState(-1);
@@ -52,7 +56,7 @@ function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) =>
   const filtered = query.trim()
     ? ALL_SYMS.filter(s =>
         normalise(s).includes(normalise(query)) ||
-        s.replace('USDT', '').includes(normalise(query))
+        s.replace('USDT','').includes(normalise(query))
       ).slice(0, 20)
     : [];
 
@@ -64,24 +68,32 @@ function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) =>
 
   useEffect(() => {
     if (cursor >= 0 && listRef.current) {
-      (listRef.current.children[cursor] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' });
+      (listRef.current.children[cursor] as HTMLElement | undefined)
+        ?.scrollIntoView({ block: 'nearest' });
     }
   }, [cursor]);
 
   return (
-    <div style={{ position: 'relative', flexShrink: 0 }}>
+    <div style={{ position: 'relative', flexShrink: 0 }} data-onboard="symbol-search">
       <input
+        ref={inputRef}
         value={query}
         placeholder={fmtSymDisplay(sym)}
         onChange={e => { setQuery(e.target.value); setOpen(true); setCursor(-1); }}
         onFocus={() => setOpen(true)}
         onBlur={() => {
-          blurTimer.current = setTimeout(() => { setOpen(false); setQuery(''); setCursor(-1); }, 180);
+          blurTimer.current = setTimeout(() => {
+            setOpen(false); setQuery(''); setCursor(-1);
+          }, 180);
         }}
         onKeyDown={e => {
           if (e.key === 'ArrowDown') { e.preventDefault(); setCursor(c => Math.min(c + 1, filtered.length - 1)); }
           else if (e.key === 'ArrowUp') { e.preventDefault(); setCursor(c => Math.max(c - 1, -1)); }
-          else if (e.key === 'Enter') { e.preventDefault(); if (cursor >= 0 && filtered[cursor]) commit(filtered[cursor]); else if (query.trim()) commit(query.trim()); }
+          else if (e.key === 'Enter') {
+            e.preventDefault();
+            if (cursor >= 0 && filtered[cursor]) commit(filtered[cursor]);
+            else if (query.trim()) commit(query.trim());
+          }
           else if (e.key === 'Escape') { setOpen(false); setQuery(''); setCursor(-1); }
         }}
         autoComplete="off" spellCheck={false}
@@ -94,7 +106,6 @@ function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) =>
           letterSpacing: '.06em', transition: 'border-color .15s',
         }}
       />
-
       {open && (
         <div
           ref={listRef}
@@ -119,7 +130,7 @@ function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) =>
                   style={{
                     padding: '7px 12px', fontSize: 11, fontFamily: 'var(--mono)',
                     cursor: 'pointer',
-                    color:      s === sym ? 'var(--accent)' : 'var(--text)',
+                    color: s === sym ? 'var(--accent)' : 'var(--text)',
                     background: i === cursor ? 'var(--bg3)' : s === sym ? 'rgba(0,229,160,0.07)' : 'transparent',
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
                   }}
@@ -131,10 +142,16 @@ function SymbolSearch({ sym, onSelect }: { sym: string; onSelect: (s: string) =>
             </>
           ) : query.trim() ? (
             <div style={{ padding: '8px 12px' }}>
-              <div style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>Custom pair</div>
+              <div style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 6 }}>
+                Custom pair
+              </div>
               <div
                 onMouseDown={() => commit(query.trim())}
-                style={{ padding: '7px 12px', fontSize: 11, fontFamily: 'var(--mono)', cursor: 'pointer', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}
+                style={{
+                  padding: '7px 0', fontSize: 11, fontFamily: 'var(--mono)',
+                  cursor: 'pointer', color: 'var(--accent)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}
               >
                 <span>Load {normalise(query.trim()).endsWith('USDT') ? normalise(query.trim()) : normalise(query.trim()) + 'USDT'}</span>
                 <span style={{ fontSize: 9, color: 'var(--text3)' }}>↵</span>
@@ -161,8 +178,16 @@ export default function Home() {
     activeTab,
   } = useStore();
 
-  const lastKlineLoad = useRef(0);
-  const pollingRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Apply theme CSS vars on mount and on theme change
+  useTheme();
+
+  const [paletteOpen, setPaletteOpen]   = useState(false);
+  const symbolInputRef = useRef<HTMLInputElement>(null);
+  const lastKlineLoad  = useRef(0);
+  const pollingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Wire global keyboard shortcuts
+  useKeyboardShortcuts(() => setPaletteOpen(true), symbolInputRef);
 
   // ── Load candles ──────────────────────────────────────────────────────────
   const loadCandles = useCallback(async (s: string, t: string) => {
@@ -170,6 +195,7 @@ export default function Home() {
     const candles = await fetchKlines(s, t);
     if (!candles || candles.length === 0) {
       setConnStatus('err', 'Failed to load candles');
+      toast.error(`Failed to load ${fmtSymDisplay(s)}`);
       return;
     }
     resetChartState();
@@ -198,25 +224,6 @@ export default function Home() {
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [sym, tf, loadCandles, tick]);
 
-  // ── Keyboard shortcuts ────────────────────────────────────────────────────
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Don't fire when typing in inputs
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement)?.tagName)) return;
-      if (e.key === 'c' || e.key === 'C') useStore.setState({ activeTab: 'chart' });
-      if (e.key === 'k' || e.key === 'K') useStore.setState({ activeTab: 'calc' });
-      if (e.key === 'j' || e.key === 'J') useStore.setState({ activeTab: 'journal' });
-      if (e.key === '1') useStore.getState().setTf('1m');
-      if (e.key === '2') useStore.getState().setTf('5m');
-      if (e.key === '3') useStore.getState().setTf('15m');
-      if (e.key === '4') useStore.getState().setTf('1h');
-      if (e.key === '5') useStore.getState().setTf('4h');
-      if (e.key === '6') useStore.getState().setTf('1d');
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, []);
-
   // ── Derived ───────────────────────────────────────────────────────────────
   const priceFlash  = livePrice >= prevLivePrice ? 'flash-green' : 'flash-red';
   const dayChgPct   = openPrice > 0 ? (livePrice - openPrice) / openPrice * 100 : 0;
@@ -233,7 +240,7 @@ export default function Home() {
   });
 
   const tabStyle = (active: boolean): React.CSSProperties => ({
-    padding: '7px 20px', fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
+    padding: '7px 18px', fontSize: 11, fontFamily: 'var(--mono)', fontWeight: 600,
     borderRadius: 'var(--radius-sm)', cursor: 'pointer', letterSpacing: '.04em',
     border: `1px solid ${active ? 'var(--border2)' : 'transparent'}`,
     background: active ? 'var(--bg3)' : 'transparent',
@@ -242,9 +249,9 @@ export default function Home() {
   });
 
   const TAB_LABELS: Record<Tab, string> = {
-    chart:   '📈 Chart',
-    calc:    '🧮 Calculator',
-    journal: '📓 Journal',
+    chart:    '📈 Chart',
+    calc:     '🧮 Calculator',
+    journal:  '📓 Journal',
     strategy: '⚡ Strategy',
   };
 
@@ -257,21 +264,25 @@ export default function Home() {
         padding: '8px 14px', borderBottom: '1px solid var(--border)',
         background: 'var(--bg2)', position: 'sticky', top: 0, zIndex: 100,
       }}>
-        {/* Logo */}
-        <span style={{
-          fontSize: 13, fontFamily: 'var(--mono)', fontWeight: 700,
-          color: 'var(--accent)', letterSpacing: '.04em', flexShrink: 0, marginRight: 4,
-        }}>
+        <span style={{ fontSize: 13, fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--accent)', letterSpacing: '.04em', flexShrink: 0, marginRight: 4 }}>
           ⚡ TradeAssist
         </span>
 
         {/* Symbol search + presets */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <SymbolSearch sym={sym} onSelect={setSym} />
+          <SymbolSearch
+            sym={sym}
+            onSelect={s => { setSym(s); toast.info(`Loaded ${fmtSymDisplay(s)}`); }}
+            inputRef={symbolInputRef}
+          />
           <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
             {PRESET_SYMS.map(s => (
-              <button key={s} onClick={() => setSym(s)} style={pill(sym === s, sym === s)}>
-                {s.replace('USDT', '')}
+              <button
+                key={s}
+                onClick={() => { setSym(s); toast.info(`Loaded ${fmtSymDisplay(s)}`); }}
+                style={pill(sym === s, sym === s)}
+              >
+                {s.replace('USDT','')}
               </button>
             ))}
           </div>
@@ -281,11 +292,28 @@ export default function Home() {
         <div style={{ width: 1, height: 20, background: 'var(--border2)', flexShrink: 0, margin: '0 2px' }} />
 
         {/* Timeframe pills */}
-        <div style={{ display: 'flex', gap: 3 }}>
+        <div style={{ display: 'flex', gap: 3 }} data-onboard="timeframe">
           {TIMEFRAMES.map(t => (
-            <button key={t} style={pill(tf === t)} onClick={() => setTf(t)}>{t}</button>
+            <button
+              key={t}
+              style={pill(tf === t)}
+              onClick={() => { setTf(t); toast.info(`Timeframe → ${t}`); }}
+            >{t}</button>
           ))}
         </div>
+
+        {/* Command palette trigger */}
+        <button
+          onClick={() => setPaletteOpen(true)}
+          title="Command palette (Cmd+K)"
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '4px 9px', fontSize: 10, fontFamily: 'var(--mono)',
+            borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+            border: '1px solid var(--border2)', background: 'var(--bg3)', color: 'var(--text3)',
+            transition: 'all .15s',
+          }}
+        >⌘K</button>
 
         {/* Live price */}
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -317,11 +345,15 @@ export default function Home() {
       </header>
 
       {/* ── Tabs ── */}
-      <nav style={{
-        display: 'flex', gap: 2, padding: '8px 16px',
-        borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
-      }}>
-        {(['chart', 'calc', 'journal', 'strategy'] as Tab[]).map(t => (
+      <nav
+        data-onboard="tabs"
+        style={{
+          display: 'flex', gap: 2, padding: '8px 16px',
+          borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
+          alignItems: 'center',
+        }}
+      >
+        {(['chart','calc','journal','strategy'] as Tab[]).map(t => (
           <button
             key={t}
             style={tabStyle(activeTab === t)}
@@ -331,19 +363,16 @@ export default function Home() {
           </button>
         ))}
 
-        {/* Keyboard shortcut hints */}
+        {/* Shortcut hints row */}
         <div style={{
           marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
           fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)',
         }}>
-          {[['C', 'chart'], ['K', 'calc'], ['J', 'journal'], ['S', 'strategy'], ['1-6', 'tf']].map(([key, label]) => (
-            <span key={key} style={{
+          {['C','K','J','S','1–6','⌘K'].map(k => (
+            <span key={k} style={{
               padding: '1px 5px', borderRadius: 3,
               border: '1px solid var(--border2)', background: 'var(--bg3)',
-              letterSpacing: '.04em',
-            }}>
-              {key}
-            </span>
+            }}>{k}</span>
           ))}
         </div>
       </nav>
@@ -355,7 +384,7 @@ export default function Home() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
             <CandleChart />
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <SuggestionCard />
+              <div data-onboard="suggestion-card"><SuggestionCard /></div>
               <EntryZones />
             </div>
             <CrossoverLog />
@@ -364,16 +393,22 @@ export default function Home() {
 
         {activeTab === 'calc' && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'start' }}>
-            <div>
-              <RRCard />
-              <GoalCard />
-            </div>
+            <div><RRCard /><GoalCard /></div>
             <FuturesCard />
           </div>
         )}
 
-        {activeTab === 'journal' && <TradeLog />}
+        {activeTab === 'journal'  && <TradeLog />}
+
+        {activeTab === 'strategy' && (
+          <div style={{ maxWidth: 760, margin: '0 auto' }}>
+            <StrategyBuilder />
+          </div>
+        )}
       </main>
+
+      {/* ── Command palette ── */}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   );
 }
