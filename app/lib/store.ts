@@ -3,7 +3,11 @@ import { persist } from 'zustand/middleware';
 import type { Strategy, StrategySignal } from './strategy';
 import { PRESET_STRATEGIES, evaluateStrategy, buildSnapshot } from './strategy';
 
-import type { Candle, CrossoverEvent, RSIState, VWAPState, CVDState, MACDState, BBState, ATRState, SuperTrendState, ADXState, OBVState, WillRState, CCIState, PsarState, PatternResult } from './indicators';
+import type {
+  Candle, CrossoverEvent, RSIState, VWAPState, CVDState,
+  MACDState, BBState, ATRState, SuperTrendState, ADXState,
+  OBVState, WillRState, CCIState, PsarState, PatternResult,
+} from './indicators';
 import {
   updEMA, emaK,
   calcWilderRSI, makeRSIState,
@@ -57,6 +61,35 @@ export interface TradeJournalEntry {
   notes:   string;
 }
 
+// ── Feature 15: Partial TPs ───────────────────────────────────────────────────
+export interface PartialTP {
+  label:  string;   // 'TP1' | 'TP2' | 'TP3'
+  rrMult: number;   // e.g. 1, 2, 3
+  price:  number;
+  pct:    number;   // % of position to close at this level
+}
+
+// ── Feature 19: Price Alerts ──────────────────────────────────────────────────
+export interface PriceAlert {
+  id:        string;
+  sym:       string;
+  price:     number;
+  dir:       'above' | 'below';
+  label:     string;
+  triggered: boolean;
+  createdAt: number;
+}
+
+// ── Feature 17: Session P&L ───────────────────────────────────────────────────
+export interface SessionPnL {
+  sessionStart:  number;
+  openPrice:     number;
+  unrealisedPct: number;
+  unrealisedUsd: number;
+  peakPct:       number;
+  troughPct:     number;
+}
+
 export interface ActiveIndicators {
   ema9:        boolean;
   ema20:       boolean;
@@ -76,8 +109,8 @@ export interface ActiveIndicators {
   volume:      boolean;
   cvd:         boolean;
   patterns:    boolean;
-  fib:         boolean;   
-  volumeProfile: boolean; 
+  fib:         boolean;
+  volumeProfile: boolean;
 }
 
 export interface IndicatorParams {
@@ -160,6 +193,11 @@ interface ChartSlice {
   connLabel:     string;
   suggestion:    Suggestion | null;
   entryQuality:  EntryQuality | null;
+  partialTPs:          PartialTP[];
+  atrTrailingStop:     number | null;
+  sessionPnL:          SessionPnL | null;
+  dailyLossBreached:   boolean;
+  priceAlerts:         PriceAlert[];
   _rsiState:    RSIState;
   _prevClose:   number | null;
   _e9:          number | null;
@@ -207,14 +245,20 @@ interface SettingsSlice {
   defaultRR:        number;
   activeIndicators: ActiveIndicators;
   indicatorParams:  IndicatorParams;
-  chartDrawings: Drawing[];
+  chartDrawings:    Drawing[];
+  // Feature 16
+  atrTrailMult:     number;
+  // Feature 18
+  maxDailyLossPct:  number;
+  // Feature 15
+  tpPartials:       [number, number, number];
+  tpPartialPcts:    [number, number, number];
 }
 
 // ──────────────────────────────────────────────────────────
 //  Actions
 // ──────────────────────────────────────────────────────────
 interface Actions {
-  // Chart
   setSym:               (sym: string) => void;
   setTf:                (tf: string) => void;
   resetChartState:      () => void;
@@ -223,11 +267,9 @@ interface Actions {
   setLivePrice:         (price: number, apiName: string) => void;
   setConnStatus:        (status: ConnStatus, label: string) => void;
   refreshSuggestion:    () => void;
-  // Indicators
   toggleIndicator:      (key: keyof ActiveIndicators) => void;
   setIndicatorParam:    (key: keyof IndicatorParams, value: number) => void;
   resetIndicatorParams: () => void;
-  // Calculator
   setActiveTab:         (tab: 'chart' | 'calc' | 'journal' | 'strategy') => void;
   setCurrentDir:        (dir: 'long' | 'short') => void;
   setRrRatio:           (r: number) => void;
@@ -240,20 +282,30 @@ interface Actions {
   setCapital:           (v: string) => void;
   setGoalPct:           (v: string) => void;
   setMargin:            (v: string) => void;
-  applySuggestionToCalc: () => void;
-  // Journal
+  applySuggestionToCalc:() => void;
   addTrade:             (t: Omit<TradeJournalEntry, 'id'>) => void;
   updateTrade:          (id: string, updates: Partial<TradeJournalEntry>) => void;
   deleteTrade:          (id: string) => void;
-  // Settings
   setSettings:          (s: Partial<SettingsSlice>) => void;
-  // Strategy
   addStrategy:          (s: Strategy) => void;
   updateStrategy:       (id: string, patch: Partial<Strategy>) => void;
   deleteStrategy:       (id: string) => void;
   setActiveStrategy:    (id: string | null) => void;
   evalActiveStrategy:   () => void;
-  setChartDrawings: (d: Drawing[]) => void;
+  setChartDrawings:     (d: Drawing[]) => void;
+  // Feature 15
+  setTpPartials:        (rrs: [number,number,number], pcts: [number,number,number]) => void;
+  // Feature 16
+  setAtrTrailMult:      (v: number) => void;
+  // Feature 17
+  initSession:          () => void;
+  // Feature 18
+  setMaxDailyLoss:      (pct: number) => void;
+  dismissDailyLossBanner: () => void;
+  // Feature 19
+  addPriceAlert:        (a: Omit<PriceAlert, 'id' | 'triggered' | 'createdAt'>) => void;
+  removePriceAlert:     (id: string) => void;
+  clearTriggeredAlerts: () => void;
 }
 
 type StoreState = ChartSlice & CalcSlice & JournalSlice & SettingsSlice & StrategySlice & Actions;
@@ -268,8 +320,7 @@ const defaultActiveIndicators: ActiveIndicators = {
   macd: false, rsi: true, stochRsi: false,
   adx: false, obv: false, williamsR: false, cci: false,
   volume: true, cvd: true, patterns: true,
-  fib: true,           
-  volumeProfile: true, 
+  fib: true, volumeProfile: true,
 };
 
 const defaultIndicatorParams: IndicatorParams = {
@@ -302,6 +353,12 @@ function makeDefaultChartSlice(): ChartSlice {
     currentCandle: null, lastCandleTime: 0,
     connStatus: 'idle', connLabel: 'Connecting…',
     suggestion: null, entryQuality: null,
+    // Feature 15-19
+    partialTPs:        [],
+    atrTrailingStop:   null,
+    sessionPnL:        null,
+    dailyLossBreached: false,
+    priceAlerts:       [],
     _rsiState:  makeRSIState(), _prevClose: null,
     _e9: null, _e20: null, _e50: null,
     _macdState:  makeMACDState(),
@@ -333,7 +390,11 @@ const defaultSettings: SettingsSlice = {
   defaultCapital: 200, defaultRR: 2,
   activeIndicators: defaultActiveIndicators,
   indicatorParams:  defaultIndicatorParams,
-  chartDrawings: [],
+  chartDrawings:    [],
+  atrTrailMult:     2.5,
+  maxDailyLossPct:  2,
+  tpPartials:       [1, 2, 3],
+  tpPartialPcts:    [33, 33, 34],
 };
 
 const defaultStrategy: StrategySlice = {
@@ -341,6 +402,51 @@ const defaultStrategy: StrategySlice = {
   activeStrategyId: 'preset-3ema',
   strategySignal:   null,
 };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/** Compute partial TP prices from suggestion + RR multiples */
+function computePartialTPs(
+  suggestion: Suggestion | null,
+  rrs:  [number, number, number],
+  pcts: [number, number, number],
+): PartialTP[] {
+  if (!suggestion) return [];
+  const risk = Math.abs(suggestion.entry - suggestion.stop);
+  return rrs.map((mult, i) => {
+    const price = suggestion.dir === 'long'
+      ? suggestion.entry + risk * mult
+      : suggestion.entry - risk * mult;
+    return { label: `TP${i + 1}`, rrMult: mult, price, pct: pcts[i] };
+  });
+}
+
+/** Compute ATR trailing stop */
+function computeAtrTrail(
+  livePrice: number,
+  suggestion: Suggestion | null,
+  atrVals: (number | null)[],
+  mult: number,
+): number | null {
+  if (!suggestion || !livePrice) return null;
+  const atr = atrVals.filter(v => v != null).slice(-1)[0];
+  if (!atr) return null;
+  return suggestion.dir === 'long'
+    ? livePrice - atr * mult
+    : livePrice + atr * mult;
+}
+
+/** Fire browser notification (no-op if permission denied) */
+function fireNotification(title: string, body: string) {
+  if (typeof window === 'undefined') return;
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/favicon.ico' });
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission().then(p => {
+      if (p === 'granted') new Notification(title, { body, icon: '/favicon.ico' });
+    });
+  }
+}
 
 // ──────────────────────────────────────────────────────────
 //  Store
@@ -353,9 +459,10 @@ export const useStore = create<StoreState>()(
       ...defaultJournal,
       ...defaultSettings,
       ...defaultStrategy,
-      // Actions    
+
       setChartDrawings: (d) => set({ chartDrawings: d }),
-      // ── Chart ──────────────────────────────────────────
+
+      // ── Chart ──────────────────────────────────────────────────────────────
       setSym: (sym) => set({ sym }),
       setTf:  (tf)  => set({ tf }),
 
@@ -370,91 +477,58 @@ export const useStore = create<StoreState>()(
         const p  = s.indicatorParams;
         const prev = s.candles[s.candles.length - 1] ?? null;
 
-        // EMA
         const prevE9  = s._e9;
         const prevE20 = s._e20;
         const newE9   = updEMA(s._e9,  c.c, emaK(p.ema9Period));
         const newE20  = updEMA(s._e20, c.c, emaK(p.ema20Period));
         const newE50  = updEMA(s._e50, c.c, emaK(p.ema50Period));
 
-        // RSI
         const rsiState = { ...s._rsiState };
         const rsiVal   = calcWilderRSI(c.c, s._prevClose, rsiState, p.rsiPeriod);
 
-        // MACD
         const macdState = { ...s._macdState };
         const { macdLine, signalLine: macdSig, histogram: macdH } = calcMACD(
           c.c, macdState, p.macdFast, p.macdSlow, p.macdSignal
         );
 
-        // Bollinger Bands
         const bbState = { closes: [...s._bbState.closes] };
         const { upper: bbU, middle: bbM, lower: bbL, width: bbW, pct: bbP } = calcBB(
           c.c, bbState, p.bbPeriod, p.bbStdDev
         );
 
-        // ATR
-        const atrState = {
-          prevClose: s._atrState.prevClose,
-          atr:       s._atrState.atr,
-          seed:      [...s._atrState.seed],
-        };
+        const atrState = { prevClose: s._atrState.prevClose, atr: s._atrState.atr, seed: [...s._atrState.seed] };
         const atrVal = calcATR(c, atrState, p.atrPeriod);
 
-        // SuperTrend
         const stState: SuperTrendState = {
           atrState:  { prevClose: s._stState.atrState.prevClose, atr: s._stState.atrState.atr, seed: [...s._stState.atrState.seed] },
-          upperBand: s._stState.upperBand,
-          lowerBand: s._stState.lowerBand,
-          superTrend: s._stState.superTrend,
-          direction:  s._stState.direction,
+          upperBand: s._stState.upperBand, lowerBand: s._stState.lowerBand,
+          superTrend: s._stState.superTrend, direction: s._stState.direction,
         };
         const { value: stVal, bull: stB } = calcSuperTrend(c, stState, p.stPeriod, p.stMultiplier);
 
-        // ADX
         const adxState: ADXState = {
-          prevHigh:  s._adxState.prevHigh,
-          prevLow:   s._adxState.prevLow,
-          prevClose: s._adxState.prevClose,
-          atr:       { ...s._adxState.atr, seed: [...s._adxState.atr.seed] },
-          plusDM:    s._adxState.plusDM,
-          minusDM:   s._adxState.minusDM,
-          adx:       s._adxState.adx,
-          seedTR:    [...s._adxState.seedTR],
-          seedPlus:  [...s._adxState.seedPlus],
-          seedMinus: [...s._adxState.seedMinus],
-          seedDX:    [...s._adxState.seedDX],
+          prevHigh: s._adxState.prevHigh, prevLow: s._adxState.prevLow, prevClose: s._adxState.prevClose,
+          atr: { ...s._adxState.atr, seed: [...s._adxState.atr.seed] },
+          plusDM: s._adxState.plusDM, minusDM: s._adxState.minusDM, adx: s._adxState.adx,
+          seedTR: [...s._adxState.seedTR], seedPlus: [...s._adxState.seedPlus],
+          seedMinus: [...s._adxState.seedMinus], seedDX: [...s._adxState.seedDX],
         };
         const { adx: adxVal, plusDI: pDI, minusDI: mDI } = calcADX(c, adxState, p.adxPeriod);
 
-        // OBV
         const obvState = { ...s._obvState };
         const obvVal   = calcOBV(c, obvState);
-
-        // Williams %R
         const willRState = { highs: [...s._willRState.highs], lows: [...s._willRState.lows] };
         const willRVal   = calcWilliamsR(c, willRState, p.williamsRPeriod);
-
-        // CCI
         const cciState = { typicals: [...s._cciState.typicals] };
         const cciVal   = calcCCI(c, cciState, p.cciPeriod);
-
-        // PSAR
         const psarState = { ...s._psarState };
         const { value: psarVal, bull: psarB } = calcPSAR(c, psarState, p.psarStep, p.psarMax);
-
-        // VWAP
         const vwapState = { ...s._vwapState };
         const { vwap: vwapV, upper1: vu1, lower1: vl1, upper2: vu2, lower2: vl2 } = calcVWAP(c, vwapState);
-
-        // CVD
         const cvdState = { ...s._cvdState };
         const { barDelta, cumDelta } = calcCVD(c, cvdState);
-
-        // Patterns
         const candlePatterns = detectPatterns(c, prev);
 
-        // Crossovers
         let newCrossovers = [...s.crossovers];
         if (prevE9 !== null && prevE20 !== null) {
           const bull = prevE9 <= (s._e20 ?? 0) && newE9 > newE20;
@@ -465,45 +539,43 @@ export const useStore = create<StoreState>()(
           }
         }
 
-        // Append series
         const push = <T>(arr: T[], val: T) => [...arr, val];
-        let newCandles    = push(s.candles,       c);
-        let newE9s        = push(s.e9s,           newE9);
-        let newE20s       = push(s.e20s,          newE20);
-        let newE50s       = push(s.e50s,          newE50);
-        let newRsi        = push(s.rsiVals,       rsiVal);
-        let newMacdLine   = push(s.macdLine,      macdLine);
-        let newMacdSig    = push(s.macdSignal,    macdSig);
-        let newMacdHist   = push(s.macdHist,      macdH);
-        let newBbUpper    = push(s.bbUpper,       bbU);
-        let newBbMiddle   = push(s.bbMiddle,      bbM);
-        let newBbLower    = push(s.bbLower,       bbL);
-        let newBbWidth    = push(s.bbWidth,       bbW);
-        let newBbPct      = push(s.bbPct,         bbP);
-        let newAtr        = push(s.atrVals,       atrVal);
-        let newStVals     = push(s.stVals,        stVal);
-        let newStBull     = push(s.stBull,        stB);
-        let newAdx        = push(s.adxVals,       adxVal);
-        let newPlusDI     = push(s.plusDI,        pDI);
-        let newMinusDI    = push(s.minusDI,       mDI);
-        let newObv        = push(s.obvVals,       obvVal);
-        let newWillR      = push(s.willRVals,     willRVal);
-        let newCci        = push(s.cciVals,       cciVal);
-        let newPsarVals   = push(s.psarVals,      psarVal);
-        let newPsarBull   = push(s.psarBull,      psarB);
-        let newVwap       = push(s.vwapVals,      vwapV);
-        let newVwapU1     = push(s.vwapUpper1,    vu1);
-        let newVwapL1     = push(s.vwapLower1,    vl1);
-        let newVwapU2     = push(s.vwapUpper2,    vu2);
-        let newVwapL2     = push(s.vwapLower2,    vl2);
-        let newCvdBar     = push(s.cvdBarDeltas,  barDelta);
-        let newCvdCum     = push(s.cvdCumDeltas,  cumDelta);
-        let newPatterns   = push(s.patterns,      candlePatterns);
+        let newCandles    = push(s.candles,      c);
+        let newE9s        = push(s.e9s,          newE9);
+        let newE20s       = push(s.e20s,         newE20);
+        let newE50s       = push(s.e50s,         newE50);
+        let newRsi        = push(s.rsiVals,      rsiVal);
+        let newMacdLine   = push(s.macdLine,     macdLine);
+        let newMacdSig    = push(s.macdSignal,   macdSig);
+        let newMacdHist   = push(s.macdHist,     macdH);
+        let newBbUpper    = push(s.bbUpper,      bbU);
+        let newBbMiddle   = push(s.bbMiddle,     bbM);
+        let newBbLower    = push(s.bbLower,      bbL);
+        let newBbWidth    = push(s.bbWidth,      bbW);
+        let newBbPct      = push(s.bbPct,        bbP);
+        let newAtr        = push(s.atrVals,      atrVal);
+        let newStVals     = push(s.stVals,       stVal);
+        let newStBull     = push(s.stBull,       stB);
+        let newAdx        = push(s.adxVals,      adxVal);
+        let newPlusDI     = push(s.plusDI,       pDI);
+        let newMinusDI    = push(s.minusDI,      mDI);
+        let newObv        = push(s.obvVals,      obvVal);
+        let newWillR      = push(s.willRVals,    willRVal);
+        let newCci        = push(s.cciVals,      cciVal);
+        let newPsarVals   = push(s.psarVals,     psarVal);
+        let newPsarBull   = push(s.psarBull,     psarB);
+        let newVwap       = push(s.vwapVals,     vwapV);
+        let newVwapU1     = push(s.vwapUpper1,   vu1);
+        let newVwapL1     = push(s.vwapLower1,   vl1);
+        let newVwapU2     = push(s.vwapUpper2,   vu2);
+        let newVwapL2     = push(s.vwapLower2,   vl2);
+        let newCvdBar     = push(s.cvdBarDeltas, barDelta);
+        let newCvdCum     = push(s.cvdCumDeltas, cumDelta);
+        let newPatterns   = push(s.patterns,     candlePatterns);
 
-        // Stoch RSI (windowed from rsiVals)
-        const rsiWindow  = newRsi.slice(-50);
-        const srPeriod   = p.stochRsiPeriod;
-        const stochKRaw  = rsiWindow.map((_, i) => {
+        const rsiWindow = newRsi.slice(-50);
+        const srPeriod  = p.stochRsiPeriod;
+        const stochKRaw = rsiWindow.map((_, i) => {
           const win = rsiWindow.slice(Math.max(0, i - srPeriod + 1), i + 1).filter(v => v !== null) as number[];
           if (win.length < srPeriod) return null;
           const lo = Math.min(...win), hi = Math.max(...win), cur = rsiWindow[i] as number;
@@ -520,56 +592,39 @@ export const useStore = create<StoreState>()(
         let newStochK = push(s.stochRsiK, smoothK[smoothK.length - 1] ?? null);
         let newStochD = push(s.stochRsiD, smoothD[smoothD.length - 1] ?? null);
 
-        // Trim to 200 candles
         if (newCandles.length > 200) {
-          newCandles.shift();   newE9s.shift();      newE20s.shift();   newE50s.shift();
-          newRsi.shift();       newMacdLine.shift();  newMacdSig.shift(); newMacdHist.shift();
-          newBbUpper.shift();   newBbMiddle.shift();  newBbLower.shift(); newBbWidth.shift(); newBbPct.shift();
-          newAtr.shift();       newStVals.shift();    newStBull.shift();
-          newAdx.shift();       newPlusDI.shift();    newMinusDI.shift();
-          newObv.shift();       newWillR.shift();     newCci.shift();
+          newCandles.shift();   newE9s.shift();     newE20s.shift();    newE50s.shift();
+          newRsi.shift();       newMacdLine.shift(); newMacdSig.shift(); newMacdHist.shift();
+          newBbUpper.shift();   newBbMiddle.shift(); newBbLower.shift(); newBbWidth.shift(); newBbPct.shift();
+          newAtr.shift();       newStVals.shift();   newStBull.shift();
+          newAdx.shift();       newPlusDI.shift();   newMinusDI.shift();
+          newObv.shift();       newWillR.shift();    newCci.shift();
           newPsarVals.shift();  newPsarBull.shift();
-          newVwap.shift();      newVwapU1.shift();    newVwapL1.shift(); newVwapU2.shift(); newVwapL2.shift();
+          newVwap.shift();      newVwapU1.shift();   newVwapL1.shift(); newVwapU2.shift(); newVwapL2.shift();
           newCvdBar.shift();    newCvdCum.shift();
-          newPatterns.shift();  newStochK.shift();    newStochD.shift();
-          newCrossovers = newCrossovers
-            .map(x => ({ ...x, idx: x.idx - 1 }))
-            .filter(x => x.idx >= 0);
+          newPatterns.shift();  newStochK.shift();   newStochD.shift();
+          newCrossovers = newCrossovers.map(x => ({ ...x, idx: x.idx - 1 })).filter(x => x.idx >= 0);
         }
 
         set({
-          candles:      newCandles,
+          candles: newCandles,
           e9s: newE9s, e20s: newE20s, e50s: newE50s,
           e9: newE9, e20: newE20, e50: newE50,
-          rsiVals:      newRsi,
-          stochRsiK:    newStochK, stochRsiD: newStochD,
-          macdLine:     newMacdLine, macdSignal: newMacdSig, macdHist: newMacdHist,
-          bbUpper:      newBbUpper, bbMiddle: newBbMiddle, bbLower: newBbLower, bbWidth: newBbWidth, bbPct: newBbPct,
-          atrVals:      newAtr,
-          stVals:       newStVals, stBull: newStBull,
-          adxVals:      newAdx, plusDI: newPlusDI, minusDI: newMinusDI,
-          obvVals:      newObv,
-          willRVals:    newWillR,
-          cciVals:      newCci,
-          psarVals:     newPsarVals, psarBull: newPsarBull,
-          vwapVals:     newVwap, vwapUpper1: newVwapU1, vwapLower1: newVwapL1, vwapUpper2: newVwapU2, vwapLower2: newVwapL2,
+          rsiVals: newRsi, stochRsiK: newStochK, stochRsiD: newStochD,
+          macdLine: newMacdLine, macdSignal: newMacdSig, macdHist: newMacdHist,
+          bbUpper: newBbUpper, bbMiddle: newBbMiddle, bbLower: newBbLower, bbWidth: newBbWidth, bbPct: newBbPct,
+          atrVals: newAtr, stVals: newStVals, stBull: newStBull,
+          adxVals: newAdx, plusDI: newPlusDI, minusDI: newMinusDI,
+          obvVals: newObv, willRVals: newWillR, cciVals: newCci,
+          psarVals: newPsarVals, psarBull: newPsarBull,
+          vwapVals: newVwap, vwapUpper1: newVwapU1, vwapLower1: newVwapL1, vwapUpper2: newVwapU2, vwapLower2: newVwapL2,
           cvdBarDeltas: newCvdBar, cvdCumDeltas: newCvdCum,
-          patterns:     newPatterns,
-          crossovers:   newCrossovers,
+          patterns: newPatterns, crossovers: newCrossovers,
           _e9: newE9, _e20: newE20, _e50: newE50,
-          _prevClose:  c.c,
-          _rsiState:   rsiState,
-          _macdState:  macdState,
-          _bbState:    bbState,
-          _atrState:   atrState,
-          _stState:    stState,
-          _adxState:   adxState,
-          _obvState:   obvState,
-          _willRState: willRState,
-          _cciState:   cciState,
-          _psarState:  psarState,
-          _vwapState:  vwapState,
-          _cvdState:   cvdState,
+          _prevClose: c.c, _rsiState: rsiState, _macdState: macdState, _bbState: bbState,
+          _atrState: atrState, _stState: stState, _adxState: adxState, _obvState: obvState,
+          _willRState: willRState, _cciState: cciState, _psarState: psarState,
+          _vwapState: vwapState, _cvdState: cvdState,
         });
       },
 
@@ -606,11 +661,52 @@ export const useStore = create<StoreState>()(
         if (now - get().lastCandleTime >= interval) {
           const finished = get().currentCandle;
           if (finished) get().addCandleToState({ ...finished });
-          set({
-            currentCandle: { o: price, h: price, l: price, c: price, v: 500, t: now },
-            lastCandleTime: now,
-          });
+          set({ currentCandle: { o: price, h: price, l: price, c: price, v: 500, t: now }, lastCandleTime: now });
         }
+
+        // ── Feature 17: update session P&L ──────────────────────────────────
+        const sess = get().sessionPnL;
+        if (sess && sess.openPrice > 0) {
+          const unrealisedPct = (price - sess.openPrice) / sess.openPrice * 100;
+          const cap = parseFloat(get().capital) || 200;
+          const unrealisedUsd = unrealisedPct * cap / 100;
+          const updatedSess: SessionPnL = {
+            ...sess,
+            unrealisedPct,
+            unrealisedUsd,
+            peakPct:   Math.max(sess.peakPct,   unrealisedPct),
+            troughPct: Math.min(sess.troughPct, unrealisedPct),
+          };
+          // ── Feature 18: daily loss check ──────────────────────────────────
+          const maxLoss = -(get().maxDailyLossPct);
+          const breached = unrealisedPct <= maxLoss;
+          set({ sessionPnL: updatedSess, dailyLossBreached: breached });
+        }
+
+        // ── Feature 19: check price alerts ────────────────────────────────
+        const alerts = get().priceAlerts;
+        if (alerts.length) {
+          const sym = get().sym;
+          const updated = alerts.map(a => {
+            if (a.triggered || a.sym !== sym) return a;
+            const hit = a.dir === 'above' ? price >= a.price : price <= a.price;
+            if (hit) {
+              fireNotification(
+                `🔔 Price Alert — ${a.sym}`,
+                `${a.label || a.dir} ${a.price.toLocaleString()} triggered at ${price.toLocaleString()}`,
+              );
+              return { ...a, triggered: true };
+            }
+            return a;
+          });
+          if (updated.some((a, i) => a.triggered !== alerts[i].triggered)) {
+            set({ priceAlerts: updated });
+          }
+        }
+
+        // ── Feature 16: ATR trailing stop ─────────────────────────────────
+        const newTrail = computeAtrTrail(price, get().suggestion, get().atrVals, get().atrTrailMult);
+        set({ atrTrailingStop: newTrail });
 
         get().refreshSuggestion();
       },
@@ -626,23 +722,26 @@ export const useStore = create<StoreState>()(
         const lastAtr   = s.atrVals.length ? s.atrVals[s.atrVals.length - 1] : null;
         const { bonus } = fiboEntryScore(s.livePrice, fibo, lastAtr);
         const q         = scoreEntryQuality(sug.dir, rsi as number, s.e9, s.e20, s.e50, s.livePrice, s.crossovers, bonus);
-        set({ suggestion: sug, entryQuality: q });
-        // Evaluate active strategy after updating suggestion data
+
+        // Feature 15: recompute partial TPs
+        const tps = computePartialTPs(sug, s.tpPartials, s.tpPartialPcts);
+        // Feature 16: recompute ATR trail
+        const trail = computeAtrTrail(s.livePrice, sug, s.atrVals, s.atrTrailMult);
+
+        set({ suggestion: sug, entryQuality: q, partialTPs: tps, atrTrailingStop: trail });
         get().evalActiveStrategy();
       },
 
-      // ── Indicators ─────────────────────────────────────
+      // ── Indicators ────────────────────────────────────────────────────────
       toggleIndicator: (key) => set(s => ({
         activeIndicators: { ...s.activeIndicators, [key]: !s.activeIndicators[key] },
       })),
-
       setIndicatorParam: (key, value) => set(s => ({
         indicatorParams: { ...s.indicatorParams, [key]: value },
       })),
-
       resetIndicatorParams: () => set({ indicatorParams: defaultIndicatorParams }),
 
-      // ── Calculator ─────────────────────────────────────
+      // ── Calculator ────────────────────────────────────────────────────────
       setActiveTab:   (activeTab)   => set({ activeTab }),
       setCurrentDir:  (currentDir)  => set({ currentDir }),
       setRrRatio:     (rrRatio)     => set({ rrRatio }),
@@ -660,64 +759,86 @@ export const useStore = create<StoreState>()(
         const { suggestion } = get();
         if (!suggestion) return;
         const d = suggestion.entry > 100 ? 2 : 4;
-        set({
-          activeTab:  'calc',
-          currentDir: suggestion.dir,
-          entryPrice: suggestion.entry.toFixed(d),
-          stopPrice:  suggestion.stop.toFixed(d),
-        });
+        set({ activeTab: 'calc', currentDir: suggestion.dir, entryPrice: suggestion.entry.toFixed(d), stopPrice: suggestion.stop.toFixed(d) });
       },
 
-      // ── Journal ────────────────────────────────────────
+      // ── Journal ───────────────────────────────────────────────────────────
       addTrade: (t) => {
         const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
         set(s => ({ trades: [...s.trades, { ...t, id }] }));
       },
-      updateTrade: (id, updates) =>
-        set(s => ({ trades: s.trades.map(t => t.id === id ? { ...t, ...updates } : t) })),
-      deleteTrade: (id) =>
-        set(s => ({ trades: s.trades.filter(t => t.id !== id) })),
+      updateTrade: (id, updates) => set(s => ({ trades: s.trades.map(t => t.id === id ? { ...t, ...updates } : t) })),
+      deleteTrade: (id) => set(s => ({ trades: s.trades.filter(t => t.id !== id) })),
 
-      // ── Settings ───────────────────────────────────────
+      // ── Settings ──────────────────────────────────────────────────────────
       setSettings: (patch) => set(patch),
 
-      // ── Strategy ───────────────────────────────────────
-      addStrategy: (s) =>
-        set(st => ({ strategies: [...st.strategies, s] })),
-
-      updateStrategy: (id, patch) =>
-        set(st => ({
-          strategies: st.strategies.map(s => s.id === id ? { ...s, ...patch } : s),
-        })),
-
-      deleteStrategy: (id) =>
-        set(st => ({
-          strategies: st.strategies.filter(s => s.id !== id),
-          // Fall back to default preset when the active strategy is deleted
-          activeStrategyId: st.activeStrategyId === id ? 'preset-3ema' : st.activeStrategyId,
-          strategySignal:   st.activeStrategyId === id ? null : st.strategySignal,
-        })),
-
+      // ── Strategy ──────────────────────────────────────────────────────────
+      addStrategy: (s) => set(st => ({ strategies: [...st.strategies, s] })),
+      updateStrategy: (id, patch) => set(st => ({ strategies: st.strategies.map(s => s.id === id ? { ...s, ...patch } : s) })),
+      deleteStrategy: (id) => set(st => ({
+        strategies: st.strategies.filter(s => s.id !== id),
+        activeStrategyId: st.activeStrategyId === id ? 'preset-3ema' : st.activeStrategyId,
+        strategySignal:   st.activeStrategyId === id ? null : st.strategySignal,
+      })),
       setActiveStrategy: (id) => set({ activeStrategyId: id, strategySignal: null }),
-
       evalActiveStrategy: () => {
         const st = get();
         const { activeStrategyId, strategies, livePrice, candles, capital } = st;
         if (!activeStrategyId || !livePrice || candles.length < 10) return;
-
         const allStrategies = [...PRESET_STRATEGIES, ...strategies];
         const strat = allStrategies.find(s => s.id === activeStrategyId);
         if (!strat) return;
-
-        const snap     = buildSnapshot(st);
-        const recent   = candles.slice(-20);
+        const snap = buildSnapshot(st);
+        const recent = candles.slice(-20);
         const recentLow  = Math.min(...recent.map(c => c.l));
         const recentHigh = Math.max(...recent.map(c => c.h));
-        const cap      = parseFloat(capital) || 200;
-
+        const cap = parseFloat(capital) || 200;
         const signal = evaluateStrategy(strat, snap, cap, recentLow, recentHigh);
         set({ strategySignal: signal });
       },
+
+      setTpPartials: (rrs, pcts) => {
+        set({ tpPartials: rrs, tpPartialPcts: pcts });
+        const s = get();
+        set({ partialTPs: computePartialTPs(s.suggestion, rrs, pcts) });
+      },
+
+      setAtrTrailMult: (v) => {
+        set({ atrTrailMult: v });
+        const s = get();
+        set({ atrTrailingStop: computeAtrTrail(s.livePrice, s.suggestion, s.atrVals, v) });
+      },
+
+      initSession: () => {
+        const { livePrice } = get();
+        if (!livePrice) return;
+        set({
+          sessionPnL: {
+            sessionStart:  Date.now(),
+            openPrice:     livePrice,
+            unrealisedPct: 0,
+            unrealisedUsd: 0,
+            peakPct:       0,
+            troughPct:     0,
+          },
+          dailyLossBreached: false,
+        });
+      },
+
+      setMaxDailyLoss: (pct) => set({ maxDailyLossPct: pct }),
+      dismissDailyLossBanner: () => set({ dailyLossBreached: false }),
+
+      addPriceAlert: (a) => {
+        // Request notification permission when first alert is added
+        if (typeof window !== 'undefined' && Notification.permission === 'default') {
+          Notification.requestPermission();
+        }
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2);
+        set(s => ({ priceAlerts: [...s.priceAlerts, { ...a, id, triggered: false, createdAt: Date.now() }] }));
+      },
+      removePriceAlert: (id) => set(s => ({ priceAlerts: s.priceAlerts.filter(a => a.id !== id) })),
+      clearTriggeredAlerts: () => set(s => ({ priceAlerts: s.priceAlerts.filter(a => !a.triggered) })),
     }),
     {
       name: 'trading_assistant',
@@ -740,7 +861,12 @@ export const useStore = create<StoreState>()(
         indicatorParams:  s.indicatorParams,
         strategies:       s.strategies,
         activeStrategyId: s.activeStrategyId,
-        chartDrawings: s.chartDrawings,
+        chartDrawings:    s.chartDrawings,
+        atrTrailMult:     s.atrTrailMult,
+        maxDailyLossPct:  s.maxDailyLossPct,
+        tpPartials:       s.tpPartials,
+        tpPartialPcts:    s.tpPartialPcts,
+        priceAlerts:      s.priceAlerts.filter(a => !a.triggered), // only keep live alerts
       }),
     }
   )
