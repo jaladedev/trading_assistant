@@ -22,7 +22,7 @@ import {
 // ── Constants ────────────────────────────────────────────────────────────────
 const PADDING = { top: 28, right: 68, bottom: 22, left: 6 };
 const SUB_H   = 80;
-const VP_W    = 56;   // pixels for volume profile column
+const VP_W    = 56;
 
 const TIMEFRAMES_FOR_MTF = ['15m', '1h', '4h', '1d'];
 
@@ -67,8 +67,15 @@ export default function CandleChart() {
   const cvdRef   = useRef<HTMLCanvasElement>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
 
-  // ── Crosshair ─────────────────────────────────────────────────────────────
-  const [crosshair, setCrosshair] = useState<{ x: number; barIdx: number; price: number } | null>(null);
+  // ── Crosshair + hovered candle ────────────────────────────────────────────
+  const [crosshair, setCrosshair] = useState<{
+    x: number;
+    barIdx: number;
+    price: number;
+    candle: typeof candles[0] | null;
+    visI: number;   // position within visible window (for tooltip flip)
+    canvasW: number;
+  } | null>(null);
 
   // ── Fullscreen ────────────────────────────────────────────────────────────
   const [fullscreen, setFullscreen] = useState(false);
@@ -577,28 +584,142 @@ export default function CandleChart() {
       ctx.fillText(txt, W - PADDING.right - VP_W + 6, y + 3);
     }
 
-    // ── Crosshair ────────────────────────────────────────────────────────────
+    // ── Crosshair + OHLCV tooltip ─────────────────────────────────────────────
     if (crosshair) {
-      const cx = crosshair.x;
-      const cy = pY(crosshair.price);
-      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-      ctx.lineWidth   = 0.6;
+      const cx  = crosshair.x;
+      const cy  = pY(crosshair.price);
+
+      // Lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth   = 0.7;
       ctx.setLineDash([3, 3]);
       ctx.beginPath(); ctx.moveTo(cx, PADDING.top); ctx.lineTo(cx, H - PADDING.bottom); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(PADDING.left, cy); ctx.lineTo(W - PADDING.right - VP_W, cy); ctx.stroke();
       ctx.setLineDash([]);
-      // Price label
-      ctx.fillStyle = 'rgba(30,40,60,0.85)';
+
+      // Price label on right axis
+      ctx.fillStyle = 'rgba(20,28,44,0.92)';
       ctx.font = '10px JetBrains Mono, monospace';
       const ptxt = fmtPrice(crosshair.price);
       const ptw  = ctx.measureText(ptxt).width;
-      ctx.fillRect(W - PADDING.right - VP_W + 2, cy - 8, ptw + 8, 15);
+      ctx.fillRect(W - PADDING.right - VP_W + 1, cy - 8, ptw + 10, 16);
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(W - PADDING.right - VP_W + 1, cy - 8, ptw + 10, 16);
       ctx.fillStyle = COL.text;
       ctx.textAlign = 'left';
       ctx.fillText(ptxt, W - PADDING.right - VP_W + 6, cy + 3);
+
+      // ── OHLCV tooltip box ──────────────────────────────────────────────────
+      if (crosshair.candle) {
+        const c    = crosshair.candle;
+        const bull = c.c >= c.o;
+        const chg  = c.o > 0 ? ((c.c - c.o) / c.o * 100) : 0;
+        const col  = bull ? COL.green : COL.red;
+
+        // Format timestamp
+        const dt = new Date(c.t);
+        const dateStr = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,'0')}-${String(dt.getUTCDate()).padStart(2,'0')} ${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')} UTC`;
+
+       const lines: { label: string; val: string; col: string }[] = [
+          { label: 'O', val: fmtPrice(c.o), col: COL.text2 },
+          { label: 'H', val: fmtPrice(c.h), col: COL.green },
+          { label: 'L', val: fmtPrice(c.l), col: COL.red },
+          { label: 'C', val: fmtPrice(c.c), col },
+          { label: 'V', val: fmtK(c.v),     col: COL.text2 },
+          { label: 'Δ', val: (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%', col },
+
+          // ── Indicator values at hovered bar ──────────────────────
+          ...(activeIndicators.ema9  && e9s[crosshair.barIdx]  != null ? [{ label: 'E9',   val: fmtPrice(e9s[crosshair.barIdx]!),  col: COL.ema9   }] : []),
+          ...(activeIndicators.ema20 && e20s[crosshair.barIdx] != null ? [{ label: 'E20',  val: fmtPrice(e20s[crosshair.barIdx]!), col: COL.ema20  }] : []),
+          ...(activeIndicators.ema50 && e50s[crosshair.barIdx] != null ? [{ label: 'E50',  val: fmtPrice(e50s[crosshair.barIdx]!), col: COL.ema50  }] : []),
+          ...(activeIndicators.vwap  && vwapVals[crosshair.barIdx] != null ? [{ label: 'VWAP', val: fmtPrice(vwapVals[crosshair.barIdx]!), col: COL.amber }] : []),
+          ...(activeIndicators.bb && bbUpper[crosshair.barIdx]  != null ? [{ label: 'BB↑', val: fmtPrice(bbUpper[crosshair.barIdx]!),  col: COL.blue }] : []),
+          ...(activeIndicators.bb && bbMiddle[crosshair.barIdx] != null ? [{ label: 'BB—', val: fmtPrice(bbMiddle[crosshair.barIdx]!), col: COL.blue }] : []),
+          ...(activeIndicators.bb && bbLower[crosshair.barIdx]  != null ? [{ label: 'BB↓', val: fmtPrice(bbLower[crosshair.barIdx]!),  col: COL.blue }] : []),
+          ...(activeIndicators.superTrend && stVals[crosshair.barIdx] != null ? [{ label: 'ST', val: fmtPrice(stVals[crosshair.barIdx]!), col: stBull[crosshair.barIdx] ? COL.green : COL.red }] : []),
+          ...(activeIndicators.psar && psarVals[crosshair.barIdx] != null ? [{ label: 'PSAR', val: fmtPrice(psarVals[crosshair.barIdx]!), col: COL.amber }] : []),
+          ...(activeIndicators.rsi  && rsiVals[crosshair.barIdx]  != null ? [{ label: 'RSI',  val: String(Math.round(rsiVals[crosshair.barIdx]!)),  col: COL.amber }] : []),
+          ...(activeIndicators.macd && macdLine[crosshair.barIdx]   != null ? [{ label: 'MACD', val: macdLine[crosshair.barIdx]!.toFixed(4),   col: COL.blue  }] : []),
+          ...(activeIndicators.macd && macdSignal[crosshair.barIdx] != null ? [{ label: 'Sig',  val: macdSignal[crosshair.barIdx]!.toFixed(4), col: COL.red   }] : []),
+          ...(activeIndicators.adx  && adxVals[crosshair.barIdx] != null ? [{ label: 'ADX', val: adxVals[crosshair.barIdx]!.toFixed(1), col: COL.purple }] : []),
+          ...(activeIndicators.cvd  && cvdCumDeltas[crosshair.barIdx] != null ? [{ label: 'CVD', val: (cvdCumDeltas[crosshair.barIdx]! >= 0 ? '+' : '') + fmtK(cvdCumDeltas[crosshair.barIdx]!), col: cvdCumDeltas[crosshair.barIdx]! >= 0 ? COL.green : COL.red }] : []),
+
+          // Patterns
+          ...(activeIndicators.patterns && patterns[crosshair.barIdx]?.length
+          ? [{ label: 'Pat', val: patterns[crosshair.barIdx].map(p => p.name).join(', '), col: patterns[crosshair.barIdx].some(p => p.bull) ? COL.green : COL.red }]
+          : []),
+        ];
+
+        ctx.font = '10px JetBrains Mono, monospace';
+        const labelW   = 12;
+        const valW     = Math.max(...lines.map(l => ctx.measureText(l.val).width)) + 4;
+        const rowH     = 16;
+        const padX     = 10, padY = 8;
+        const boxW     = labelW + valW + padX * 2 + 8;
+        const boxH     = lines.length * rowH + padY * 2 + 16;  // +16 for date header
+
+        // Flip tooltip to right side of cursor if near right edge
+        const flipRight = crosshair.canvasW - cx < boxW + 20;
+        const tx = flipRight ? cx - boxW - 8 : cx + 10;
+        const ty = Math.min(PADDING.top + 4, H - boxH - 4);
+
+        // Background + border
+        ctx.fillStyle = 'rgba(13,16,23,0.94)';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(tx, ty, boxW, boxH, 5);
+        else ctx.rect(tx, ty, boxW, boxH);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+
+        // Left accent bar in candle colour
+        ctx.fillStyle = hexAlpha(col, 0.7);
+        ctx.fillRect(tx, ty, 3, boxH);
+
+        // Date header
+        ctx.fillStyle = COL.text3;
+        ctx.font      = '9px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(dateStr, tx + padX, ty + padY + 7);
+
+        // Separator
+        ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+        ctx.lineWidth   = 0.5;
+        ctx.beginPath();
+        ctx.moveTo(tx + 4, ty + padY + 12);
+        ctx.lineTo(tx + boxW - 4, ty + padY + 12);
+        ctx.stroke();
+
+        // OHLCV rows
+        ctx.font = '10px JetBrains Mono, monospace';
+        lines.forEach((ln, i) => {
+          const ry = ty + padY + 14 + (i + 1) * rowH;
+          ctx.fillStyle = COL.text3;
+          ctx.textAlign = 'left';
+          ctx.fillText(ln.label, tx + padX, ry);
+          ctx.fillStyle = ln.col;
+          ctx.textAlign = 'right';
+          ctx.fillText(ln.val, tx + boxW - padX, ry);
+        });
+      }
     }
 
-    // ── Divergence badge on chart ─────────────────────────────────────────────
+    // ── Time label on x-axis under crosshair ──────────────────────────────────
+    if (crosshair?.candle) {
+      const c  = crosshair.candle;
+      const dt = new Date(c.t);
+      const timeStr = `${String(dt.getUTCMonth()+1).padStart(2,'0')}/${String(dt.getUTCDate()).padStart(2,'0')} ${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')}`;
+      ctx.font      = '9px JetBrains Mono, monospace';
+      const tw      = ctx.measureText(timeStr).width;
+      const lx      = crosshair.x - tw / 2 - 5;
+      ctx.fillStyle = 'rgba(20,28,44,0.92)';
+      ctx.fillRect(lx, H - PADDING.bottom + 2, tw + 10, 14);
+      ctx.fillStyle = COL.text2;
+      ctx.textAlign = 'left';
+      ctx.fillText(timeStr, lx + 5, H - PADDING.bottom + 12);
+    }
     if (divergence) {
       const col   = divergence.type.includes('bull') ? COL.green : COL.red;
       const badge = divergence.label;
@@ -636,7 +757,7 @@ export default function CandleChart() {
     stVals, stBull, psarVals, psarBull,
     patterns, activeIndicators,
     showVP, showAutoFib, fiboOverlay, divergence, fiboScore,
-    drawings, selectedId, crosshair,
+    drawings, selectedId, crosshair, allCandles,
   ]);
 
   // ── Sub-pane renderers ────────────────────────────────────────────────────
@@ -868,13 +989,17 @@ export default function CandleChart() {
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = mainRef.current;
     if (!canvas) return;
-    const rect   = canvas.getBoundingClientRect();
-    const px     = (e.clientX - rect.left);
-    const py     = (e.clientY - rect.top);
-    const price  = pixToPrice(py, canvas.clientHeight);
-    const barIdx = pixToBar(px);
-    setCrosshair({ x: px, barIdx, price });
-  }, []);
+    const rect    = canvas.getBoundingClientRect();
+    const px      = (e.clientX - rect.left);
+    const py      = (e.clientY - rect.top);
+    const price   = pixToPrice(py, canvas.clientHeight);
+    const barIdx  = pixToBar(px);
+    const { barW, offset } = coordRef.current;
+    const visI    = Math.floor((px - PADDING.left) / barW);
+    const absIdx  = offset + visI;
+    const candle  = (absIdx >= 0 && absIdx < allCandles.length) ? allCandles[absIdx] : null;
+    setCrosshair({ x: px, barIdx, price, candle, visI, canvasW: canvas.clientWidth });
+  }, [allCandles]);
 
   const handleMouseLeave = useCallback(() => setCrosshair(null), []);
 
@@ -1041,6 +1166,50 @@ export default function CandleChart() {
         <span style={{ marginLeft: 'auto', fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
           {activeTool ? `Drawing: ${TOOL_DEFAULTS[activeTool].label} — click to place` : 'F=fullscreen  ← scroll=history  Del=erase'}
         </span>
+      </div>
+
+      {/* ── OHLCV hover bar ─────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+        padding: '4px 12px', background: 'var(--bg3)',
+        border: '1px solid var(--border)', borderBottom: 'none',
+        minHeight: 24,
+      }}>
+        {crosshair?.candle ? (() => {
+          const c    = crosshair.candle!;
+          const bull = c.c >= c.o;
+          const chg  = c.o > 0 ? ((c.c - c.o) / c.o * 100) : 0;
+          const col  = bull ? 'var(--green)' : 'var(--red)';
+          const dt   = new Date(c.t);
+          const ts   = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth()+1).padStart(2,'0')}-${String(dt.getUTCDate()).padStart(2,'0')} ${String(dt.getUTCHours()).padStart(2,'0')}:${String(dt.getUTCMinutes()).padStart(2,'0')} UTC`;
+          return (
+            <>
+              <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>{ts}</span>
+              {[
+                { l: 'O', v: fmtPrice(c.o), c: 'var(--text2)' },
+                { l: 'H', v: fmtPrice(c.h), c: 'var(--green)' },
+                { l: 'L', v: fmtPrice(c.l), c: 'var(--red)'   },
+                { l: 'C', v: fmtPrice(c.c), c: col            },
+                { l: 'V', v: fmtK(c.v),     c: 'var(--text2)' },
+              ].map(({ l, v, c: fc }) => (
+                <span key={l} style={{ fontSize: 10, fontFamily: 'var(--mono)' }}>
+                  <span style={{ color: 'var(--text3)', marginRight: 2 }}>{l}</span>
+                  <span style={{ color: fc, fontWeight: 600 }}>{v}</span>
+                </span>
+              ))}
+              <span style={{
+                fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700,
+                color: col, marginLeft: 2,
+              }}>
+                {chg >= 0 ? '+' : ''}{chg.toFixed(2)}%
+              </span>
+            </>
+          );
+        })() : (
+          <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)' }}>
+            Hover over the chart to see candle details
+          </span>
+        )}
       </div>
 
       {/* ── Main canvas ─────────────────────────────────────────────────── */}
