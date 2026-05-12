@@ -15,11 +15,12 @@ import FuturesCard from '@/components/calculator/FuturesCard';
 import GoalCard from '@/components/calculator/GoalCard';
 import TradeLog from '@/components/journal/TradeLog';
 import StrategyBuilder from '@/components/strategy/StrategyBuilder';
-import BacktestPanel from '@/components/ui/BacktestPanel';
+import BacktestPanel from '@/components/chart/BacktestPanel';
 import CommandPalette, { useKeyboardShortcuts } from '@/components/ui/CommandPalette';
 import { useTheme } from '@/components/ui/ThemeToggle';
 import { toast } from '@/components/ui/Toast';
 import { fmtPrice, fmtSymDisplay } from '@/lib/indicators';
+import ScreenerPanel from '@/components/screener/ScreenerPanel';
 
 // ── Symbol catalogue ──────────────────────────────────────────────────────────
 const PRESET_SYMS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT','TONUSDT'];
@@ -37,7 +38,7 @@ const ALL_SYMS = [
 ];
 
 const TIMEFRAMES = ['1m','5m','15m','1h','4h','1d'];
-type Tab = 'chart' | 'calc' | 'journal' | 'strategy';
+type Tab = 'chart' | 'calc' | 'journal' | 'strategy' | 'screener';
 
 const STATUS_COLOR: Record<string, string> = {
   idle: '#6b7591', live: '#00e5a0', warn: '#ffb82e', err: '#ff3d5a',
@@ -268,6 +269,7 @@ export default function Home() {
     calc:     '🧮 Calculator',
     journal:  '📓 Journal',
     strategy: '⚡ Strategy',
+    screener: '🔍 Screener',
   };
 
   return (
@@ -385,7 +387,7 @@ export default function Home() {
           alignItems: 'center',
         }}
       >
-        {(['chart','calc','journal','strategy'] as Tab[]).map(t => (
+        {(['chart','calc','journal','strategy','screener'] as Tab[]).map(t => (
           <button
             key={t}
             style={tabStyle(activeTab === t)}
@@ -475,6 +477,12 @@ export default function Home() {
         {activeTab === 'strategy' && (
           <div style={{ maxWidth: 760, margin: '0 auto' }}>
             <StrategyBuilder />
+          </div>
+        )}
+
+        {activeTab === 'screener' && (
+          <div style={{ maxWidth: 760, margin: '0 auto' }}>
+            <ScreenerPanel />
           </div>
         )}
       </main>

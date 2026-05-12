@@ -236,7 +236,7 @@ interface ChartSlice {
 }
 
 interface CalcSlice {
-  activeTab:  'chart' | 'calc' | 'journal' | 'strategy';
+  activeTab:  'chart' | 'calc' | 'journal' | 'strategy' | 'screener';
   currentDir: 'long' | 'short';
   rrRatio:    number;
   entryPrice: string;
@@ -285,7 +285,7 @@ interface Actions {
   toggleIndicator:      (key: keyof ActiveIndicators) => void;
   setIndicatorParam:    (key: keyof IndicatorParams, value: number) => void;
   resetIndicatorParams: () => void;
-  setActiveTab:         (tab: 'chart' | 'calc' | 'journal' | 'strategy') => void;
+  setActiveTab:         (tab: 'chart' | 'calc' | 'journal' | 'strategy' | 'screener') => void;
   setCurrentDir:        (dir: 'long' | 'short') => void;
   setRrRatio:           (r: number) => void;
   setEntryPrice:        (v: string) => void;
@@ -330,6 +330,10 @@ interface Actions {
   // Backtest (BacktestPanel API)
   setBacktestResult:    (r: BacktestResult | null) => void;
   setBacktestRunning:   (v: boolean) => void;
+  exportStrategy:         (id: string) => void;
+  importStrategy:         (json: string) => { ok: boolean; error?: string };
+  duplicateStrategy:      (id: string) => void;
+  toggleStrategyEnabled:  (id: string) => void;
 }
 
 type StoreState = ChartSlice & CalcSlice & JournalSlice & SettingsSlice & StrategySlice & Actions;
@@ -886,6 +890,63 @@ export const useStore = create<StoreState>()(
       // ── Backtest (BacktestPanel API) ──────────────────────────────────────
       setBacktestResult:  (r) => set({ backtestResult: r }),
       setBacktestRunning: (v) => set({ backtestRunning: v }),
+      exportStrategy: (id) => {
+        const s = get();
+        const allStrats = [...PRESET_STRATEGIES, ...s.strategies];
+        const strat = allStrats.find(st => st.id === id);
+        if (!strat) return;
+        const blob = new Blob([JSON.stringify(strat, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `strategy_${strat.name.replace(/\s+/g,'_')}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      },
+
+      importStrategy: (json) => {
+        try {
+          const parsed = JSON.parse(json);
+          if (!parsed || typeof parsed !== 'object') return { ok: false, error: 'Invalid JSON' };
+          if (!parsed.name) return { ok: false, error: 'Missing strategy name' };
+          if (!parsed.longEntry && !parsed.shortEntry) return { ok: false, error: 'No entry conditions found' };
+          const newStrat: Strategy = {
+            ...parsed,
+            id:        Date.now().toString(36) + Math.random().toString(36).slice(2),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            enabled:   parsed.enabled ?? true,
+          };
+          set(s => ({ strategies: [...s.strategies, newStrat] }));
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: `Parse error: ${e}` };
+        }
+      },
+
+      duplicateStrategy: (id) => {
+        const s = get();
+        const allStrats = [...PRESET_STRATEGIES, ...s.strategies];
+        const orig = allStrats.find(st => st.id === id);
+        if (!orig) return;
+        const dup: Strategy = {
+          ...JSON.parse(JSON.stringify(orig)),
+          id:        Date.now().toString(36) + Math.random().toString(36).slice(2),
+          name:      orig.name + ' (copy)',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          enabled:   false,
+        };
+        set(s => ({ strategies: [...s.strategies, dup] }));
+      },
+
+      toggleStrategyEnabled: (id) => {
+        set(s => ({
+          strategies: s.strategies.map(st =>
+            st.id === id ? { ...st, enabled: !st.enabled, updatedAt: Date.now() } : st
+          ),
+        }));
+      },
     }),
     {
       name: 'trading_assistant',
