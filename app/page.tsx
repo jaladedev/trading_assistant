@@ -7,11 +7,15 @@ import CandleChart from '@/components/chart/CandleChart';
 import CrossoverLog from '@/components/chart/CrossoverLog';
 import EntryZones from '@/components/chart/EntryZones';
 import SuggestionCard from '@/components/chart/SuggestionCard';
+import IndicatorPanel from '@/components/chart/IndicatorPanel';
+import SessionPnL from '@/components/chart/SessionPnL';
+import PriceAlerts from '@/components/chart/PriceAlerts';
 import RRCard from '@/components/calculator/RRCard';
 import FuturesCard from '@/components/calculator/FuturesCard';
 import GoalCard from '@/components/calculator/GoalCard';
 import TradeLog from '@/components/journal/TradeLog';
 import StrategyBuilder from '@/components/strategy/StrategyBuilder';
+import BacktestPanel from '@/components/ui/BacktestPanel';
 import CommandPalette, { useKeyboardShortcuts } from '@/components/ui/CommandPalette';
 import { useTheme } from '@/components/ui/ThemeToggle';
 import { toast } from '@/components/ui/Toast';
@@ -178,18 +182,20 @@ export default function Home() {
     activeTab,
   } = useStore();
 
-  // Apply theme CSS vars on mount and on theme change
   useTheme();
 
-  const [paletteOpen, setPaletteOpen]   = useState(false);
+  const [paletteOpen,    setPaletteOpen]    = useState(false);
+  const [indicatorOpen,  setIndicatorOpen]  = useState(false);
+  // Which chart sub-section is expanded below the chart
+  const [chartSection,   setChartSection]   = useState<'analysis' | 'session' | 'alerts' | 'backtest'>('analysis');
+
   const symbolInputRef = useRef<HTMLInputElement>(null);
   const lastKlineLoad  = useRef(0);
   const pollingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Wire global keyboard shortcuts
   useKeyboardShortcuts(() => setPaletteOpen(true), symbolInputRef);
 
-  // ── Load candles ──────────────────────────────────────────────────────────
+  // ── Load candles ────────────────────────────────────────────────────────────
   const loadCandles = useCallback(async (s: string, t: string) => {
     setConnStatus('idle', 'Loading…');
     const candles = await fetchKlines(s, t);
@@ -204,7 +210,7 @@ export default function Home() {
     setConnStatus('live', 'Live');
   }, [setConnStatus, resetChartState, addCandleToState]);
 
-  // ── Tick ──────────────────────────────────────────────────────────────────
+  // ── Tick ────────────────────────────────────────────────────────────────────
   const tick = useCallback(async () => {
     const s      = useStore.getState().sym;
     const t      = useStore.getState().tf;
@@ -216,7 +222,7 @@ export default function Home() {
     if (Date.now() - lastKlineLoad.current > interval) await loadCandles(s, t);
   }, [setConnStatus, setLivePrice, loadCandles]);
 
-  // ── Bootstrap on sym / tf change ──────────────────────────────────────────
+  // ── Bootstrap on sym / tf change ────────────────────────────────────────────
   useEffect(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
     loadCandles(sym, tf).then(() => tick());
@@ -224,12 +230,12 @@ export default function Home() {
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
   }, [sym, tf, loadCandles, tick]);
 
-  // ── Derived ───────────────────────────────────────────────────────────────
+  // ── Derived ─────────────────────────────────────────────────────────────────
   const priceFlash  = livePrice >= prevLivePrice ? 'flash-green' : 'flash-red';
   const dayChgPct   = openPrice > 0 ? (livePrice - openPrice) / openPrice * 100 : 0;
   const dayChgColor = dayChgPct >= 0 ? 'var(--green)' : 'var(--red)';
 
-  // ── Style helpers ──────────────────────────────────────────────────────────
+  // ── Style helpers ────────────────────────────────────────────────────────────
   const pill = (active: boolean, accent = false): React.CSSProperties => ({
     padding: '4px 10px', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
     borderRadius: 16, cursor: 'pointer', letterSpacing: '.04em',
@@ -245,6 +251,15 @@ export default function Home() {
     border: `1px solid ${active ? 'var(--border2)' : 'transparent'}`,
     background: active ? 'var(--bg3)' : 'transparent',
     color: active ? 'var(--text)' : 'var(--text2)',
+    transition: 'all .15s',
+  });
+
+  const sectionTab = (active: boolean): React.CSSProperties => ({
+    padding: '5px 14px', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+    borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+    border: `1px solid ${active ? 'var(--border2)' : 'transparent'}`,
+    background: active ? 'var(--bg3)' : 'transparent',
+    color: active ? 'var(--text)' : 'var(--text3)',
     transition: 'all .15s',
   });
 
@@ -301,6 +316,23 @@ export default function Home() {
             >{t}</button>
           ))}
         </div>
+
+        {/* Indicators button — only visible on chart tab */}
+        {activeTab === 'chart' && (
+          <button
+            onClick={() => setIndicatorOpen(true)}
+            title="Configure indicators"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '4px 10px', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+              borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+              border: '1px solid var(--border2)', background: 'var(--bg3)', color: 'var(--text2)',
+              transition: 'all .15s',
+            }}
+          >
+            📊 Indicators
+          </button>
+        )}
 
         {/* Command palette trigger */}
         <button
@@ -363,7 +395,7 @@ export default function Home() {
           </button>
         ))}
 
-        {/* Shortcut hints row */}
+        {/* Shortcut hints */}
         <div style={{
           marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
           fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--text3)',
@@ -382,12 +414,52 @@ export default function Home() {
 
         {activeTab === 'chart' && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
+
+            {/* Candle chart */}
             <CandleChart />
+
+            {/* Suggestion + Entry zones */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div data-onboard="suggestion-card"><SuggestionCard /></div>
               <EntryZones />
             </div>
+
             <CrossoverLog />
+
+            {/* ── Chart sub-section tabs ── */}
+            <div style={{
+              display: 'flex', gap: 4, padding: '6px 0',
+              borderBottom: '1px solid var(--border)',
+            }}>
+              {([
+                ['analysis', '📈 Analysis'],
+                ['session',  '📊 Session P&L'],
+                ['alerts',   '🔔 Alerts'],
+                ['backtest', '⚙ Backtest'],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  style={sectionTab(chartSection === key)}
+                  onClick={() => setChartSection(key)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Sub-section content */}
+            {chartSection === 'analysis' && (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div data-onboard="suggestion-card"><SuggestionCard /></div>
+                  <EntryZones />
+                </div>
+                <CrossoverLog />
+              </>
+            )}
+            {chartSection === 'session'  && <SessionPnL />}
+            {chartSection === 'alerts'   && <PriceAlerts />}
+            {chartSection === 'backtest' && <BacktestPanel />}
           </div>
         )}
 
@@ -406,6 +478,11 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* ── Indicator slide-over ── */}
+      {indicatorOpen && (
+        <IndicatorPanel onClose={() => setIndicatorOpen(false)} />
+      )}
 
       {/* ── Command palette ── */}
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
