@@ -33,6 +33,42 @@ import { tickPosition } from './paperTrading';
 import { idbPutTrade, idbDeleteTrade, idbGetAllTrades, idbReplaceTrades } from './journalDb';
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Module-level mutable indicator state
+//  Reset via resetIndicatorState() on sym/tf change.
+// ─────────────────────────────────────────────────────────────────────────────
+function makeIndicatorStateContainer() {
+  return {
+    rsiState:  makeRSIState(),
+    prevClose: null as number | null,
+    e9:        null as number | null,
+    e20:       null as number | null,
+    e50:       null as number | null,
+    macdState:  makeMACDState(),
+    bbState:    makeBBState(),
+    atrState:   makeATRState(),
+    stState:    makeSuperTrendState(),
+    adxState:   makeADXState(),
+    obvState:   makeOBVState(),
+    willRState: makeWillRState(),
+    cciState:   makeCCIState(),
+    psarState:  makePsarState(),
+    vwapState:  makeVWAPState(),
+    cvdState:   makeCVDState(),
+  };
+}
+
+// Single module-level instance — reset when sym/tf changes
+let _indState = makeIndicatorStateContainer();
+
+export function resetIndicatorState() {
+  _indState = makeIndicatorStateContainer();
+}
+
+export function getIndicatorState() {
+  return _indState;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Types
 // ─────────────────────────────────────────────────────────────────────────────
 export type ConnStatus = 'idle' | 'live' | 'err' | 'warn';
@@ -211,22 +247,6 @@ interface ChartSlice {
   backtestResult:           BacktestResult | null;
   backtestRunning:          boolean;
   paperAccount:             PaperAccount;
-  _rsiState:    RSIState;
-  _prevClose:   number | null;
-  _e9:          number | null;
-  _e20:         number | null;
-  _e50:         number | null;
-  _macdState:   MACDState;
-  _bbState:     BBState;
-  _atrState:    ATRState;
-  _stState:     SuperTrendState;
-  _adxState:    ADXState;
-  _obvState:    OBVState;
-  _willRState:  WillRState;
-  _cciState:    CCIState;
-  _psarState:   PsarState;
-  _vwapState:   VWAPState;
-  _cvdState:    CVDState;
 }
 
 interface CalcSlice {
@@ -398,14 +418,6 @@ function makeDefaultChartSlice(): ChartSlice {
     backtestResult:           null,
     backtestRunning:          false,
     paperAccount:             { ...defaultPaperAccount },
-    _rsiState:  makeRSIState(), _prevClose: null,
-    _e9: null, _e20: null, _e50: null,
-    _macdState:  makeMACDState(),  _bbState:    makeBBState(),
-    _atrState:   makeATRState(),   _stState:    makeSuperTrendState(),
-    _adxState:   makeADXState(),   _obvState:   makeOBVState(),
-    _willRState: makeWillRState(), _cciState:   makeCCIState(),
-    _psarState:  makePsarState(),  _vwapState:  makeVWAPState(),
-    _cvdState:   makeCVDState(),
   };
 }
 
@@ -498,47 +510,71 @@ export const useStore = create<StoreState>()(
       ...defaultStrategy,
 
       setChartDrawings: (d) => set({ chartDrawings: d }),
-      setSym: (sym) => set({ sym }),
-      setTf:  (tf)  => set({ tf }),
 
-      resetChartState: () => set(s => ({
-        ...makeDefaultChartSlice(),
-        sym: s.sym, tf: s.tf,
-        paperAccount: s.paperAccount, // preserve paper account
-      })),
+      setSym: (sym) => { get().resetChartState(); set({ sym }); },
+      setTf:  (tf)  => { get().resetChartState(); set({ tf }); },
+
+      // Step 4: resetChartState now also resets module-level indicator state
+      resetChartState: () => {
+        resetIndicatorState();
+        set(s => ({
+          ...makeDefaultChartSlice(),
+          sym: s.sym, tf: s.tf,
+          paperAccount: s.paperAccount, // preserve paper account
+        }));
+      },
 
       addCandleToState: (c) => {
         const s = get(), p = s.indicatorParams, prev = s.candles[s.candles.length - 1] ?? null;
+        const ind = getIndicatorState();
 
-        const prevE9 = s._e9;
-        const newE9  = updEMA(s._e9,  c.c, emaK(p.ema9Period));
-        const newE20 = updEMA(s._e20, c.c, emaK(p.ema20Period));
-        const newE50 = updEMA(s._e50, c.c, emaK(p.ema50Period));
+        const prevE9 = ind.e9;
+        const newE9  = updEMA(ind.e9,  c.c, emaK(p.ema9Period));
+        const newE20 = updEMA(ind.e20, c.c, emaK(p.ema20Period));
+        const newE50 = updEMA(ind.e50, c.c, emaK(p.ema50Period));
 
-        const rsiState  = { ...s._rsiState };
-        const rsiVal    = calcWilderRSI(c.c, s._prevClose, rsiState, p.rsiPeriod);
-        const macdState = { ...s._macdState };
+        const rsiState  = { ...ind.rsiState };
+        const rsiVal    = calcWilderRSI(c.c, ind.prevClose, rsiState, p.rsiPeriod);
+        const macdState = { ...ind.macdState };
         const { macdLine, signalLine: macdSig, histogram: macdH } = calcMACD(c.c, macdState, p.macdFast, p.macdSlow, p.macdSignal);
-        const bbState   = { closes: [...s._bbState.closes] };
+        const bbState   = { closes: [...ind.bbState.closes] };
         const { upper: bbU, middle: bbM, lower: bbL, width: bbW, pct: bbP } = calcBB(c.c, bbState, p.bbPeriod, p.bbStdDev);
-        const atrState  = { prevClose: s._atrState.prevClose, atr: s._atrState.atr, seed: [...s._atrState.seed] };
+        const atrState  = { prevClose: ind.atrState.prevClose, atr: ind.atrState.atr, seed: [...ind.atrState.seed] };
         const atrVal    = calcATR(c, atrState, p.atrPeriod);
-        const stState: SuperTrendState = { atrState: { prevClose: s._stState.atrState.prevClose, atr: s._stState.atrState.atr, seed: [...s._stState.atrState.seed] }, upperBand: s._stState.upperBand, lowerBand: s._stState.lowerBand, superTrend: s._stState.superTrend, direction: s._stState.direction };
+        const stState: SuperTrendState = { atrState: { prevClose: ind.stState.atrState.prevClose, atr: ind.stState.atrState.atr, seed: [...ind.stState.atrState.seed] }, upperBand: ind.stState.upperBand, lowerBand: ind.stState.lowerBand, superTrend: ind.stState.superTrend, direction: ind.stState.direction };
         const { value: stVal, bull: stB } = calcSuperTrend(c, stState, p.stPeriod, p.stMultiplier);
-        const adxState: ADXState = { prevHigh: s._adxState.prevHigh, prevLow: s._adxState.prevLow, prevClose: s._adxState.prevClose, atr: { ...s._adxState.atr, seed: [...s._adxState.atr.seed] }, plusDM: s._adxState.plusDM, minusDM: s._adxState.minusDM, adx: s._adxState.adx, seedTR: [...s._adxState.seedTR], seedPlus: [...s._adxState.seedPlus], seedMinus: [...s._adxState.seedMinus], seedDX: [...s._adxState.seedDX] };
+        const adxState: ADXState = { prevHigh: ind.adxState.prevHigh, prevLow: ind.adxState.prevLow, prevClose: ind.adxState.prevClose, atr: { ...ind.adxState.atr, seed: [...ind.adxState.atr.seed] }, plusDM: ind.adxState.plusDM, minusDM: ind.adxState.minusDM, adx: ind.adxState.adx, seedTR: [...ind.adxState.seedTR], seedPlus: [...ind.adxState.seedPlus], seedMinus: [...ind.adxState.seedMinus], seedDX: [...ind.adxState.seedDX] };
         const { adx: adxVal, plusDI: pDI, minusDI: mDI } = calcADX(c, adxState, p.adxPeriod);
-        const obvState   = { ...s._obvState };   const obvVal     = calcOBV(c, obvState);
-        const willRState = { highs: [...s._willRState.highs], lows: [...s._willRState.lows] }; const willRVal = calcWilliamsR(c, willRState, p.williamsRPeriod);
-        const cciState   = { typicals: [...s._cciState.typicals] }; const cciVal = calcCCI(c, cciState, p.cciPeriod);
-        const psarState  = { ...s._psarState }; const { value: psarVal, bull: psarB } = calcPSAR(c, psarState, p.psarStep, p.psarMax);
-        const vwapState  = { ...s._vwapState }; const { vwap: vwapV, upper1: vu1, lower1: vl1, upper2: vu2, lower2: vl2 } = calcVWAP(c, vwapState);
-        const cvdState   = { ...s._cvdState };  const { barDelta, cumDelta } = calcCVD(c, cvdState);
+        const obvState   = { ...ind.obvState };   const obvVal     = calcOBV(c, obvState);
+        const willRState = { highs: [...ind.willRState.highs], lows: [...ind.willRState.lows] }; const willRVal = calcWilliamsR(c, willRState, p.williamsRPeriod);
+        const cciState   = { typicals: [...ind.cciState.typicals] }; const cciVal = calcCCI(c, cciState, p.cciPeriod);
+        const psarState  = { ...ind.psarState }; const { value: psarVal, bull: psarB } = calcPSAR(c, psarState, p.psarStep, p.psarMax);
+        const vwapState  = { ...ind.vwapState }; const { vwap: vwapV, upper1: vu1, lower1: vl1, upper2: vu2, lower2: vl2 } = calcVWAP(c, vwapState);
+        const cvdState   = { ...ind.cvdState };  const { barDelta, cumDelta } = calcCVD(c, cvdState);
         const candlePatterns = detectPatterns(c, prev);
 
+        // Mutate the module-level indicator state directly (no set() needed for these)
+        ind.e9        = newE9;
+        ind.e20       = newE20;
+        ind.e50       = newE50;
+        ind.prevClose = c.c;
+        ind.rsiState  = rsiState;
+        ind.macdState = macdState;
+        ind.bbState   = bbState;
+        ind.atrState  = atrState;
+        ind.stState   = stState;
+        ind.adxState  = adxState;
+        ind.obvState  = obvState;
+        ind.willRState = willRState;
+        ind.cciState  = cciState;
+        ind.psarState = psarState;
+        ind.vwapState = vwapState;
+        ind.cvdState  = cvdState;
+
         let newCrossovers = [...s.crossovers];
-        if (prevE9 !== null && s._e20 !== null) {
-          const bull = prevE9 <= s._e20 && newE9 > newE20;
-          const bear = prevE9 >= s._e20 && newE9 < newE20;
+        if (prevE9 !== null && ind.e20 !== null) {
+          const bull = prevE9 <= s.e20! && newE9 > newE20;
+          const bear = prevE9 >= s.e20! && newE9 < newE20;
           if (bull || bear) {
             newCrossovers.push({ type: bull ? 'bull' : 'bear', price: c.c, idx: s.candles.length, time: Date.now() });
             if (newCrossovers.length > 8) newCrossovers.shift();
@@ -591,6 +627,7 @@ export const useStore = create<StoreState>()(
           newCrossovers = newCrossovers.map(x=>({...x,idx:x.idx-1})).filter(x=>x.idx>=0);
         }
 
+        // Only set() the derived arrays that components actually subscribe to
         set({
           candles:nC, e9s:nE9, e20s:nE20, e50s:nE50, e9:newE9, e20:newE20, e50:newE50,
           rsiVals:nR, stochRsiK:nSK, stochRsiD:nSD,
@@ -603,11 +640,6 @@ export const useStore = create<StoreState>()(
           vwapVals:nVW, vwapUpper1:nVU1, vwapLower1:nVL1, vwapUpper2:nVU2, vwapLower2:nVL2,
           cvdBarDeltas:nCB, cvdCumDeltas:nCvdCumDeltas,   
           patterns:nPat, crossovers:newCrossovers,
-          _e9:newE9, _e20:newE20, _e50:newE50,
-          _prevClose:c.c, _rsiState:rsiState, _macdState:macdState, _bbState:bbState,
-          _atrState:atrState, _stState:stState, _adxState:adxState, _obvState:obvState,
-          _willRState:willRState, _cciState:cciState, _psarState:psarState,
-          _vwapState:vwapState, _cvdState:cvdState,
         });
       },
 
