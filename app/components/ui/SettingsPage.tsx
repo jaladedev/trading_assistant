@@ -126,7 +126,7 @@ export default function SettingsPage() {
 
   const handleCloudPush = async () => {
     setCloudLoading(true);
-    const res = await pushStateToCloud(useStore.getState() as Record<string, unknown>);
+    const res = await pushStateToCloud(useStore.getState() as unknown as Record<string, unknown>);
     setCloudLoading(false);
     setCloudStatus(res.ok ? '✓ State pushed to cloud.' : `Error: ${res.error}`);
     if (res.ok) toast.success('State synced to cloud');
@@ -150,7 +150,7 @@ export default function SettingsPage() {
 
   // ── Export / Import ──────────────────────────────────────────────────────
   const handleExport = () => {
-    downloadStateJSON(useStore.getState() as Record<string, unknown>);
+    downloadStateJSON(useStore.getState() as unknown as Record<string, unknown>);
     toast.success('State exported as JSON');
   };
 

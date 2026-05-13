@@ -68,16 +68,16 @@ export default function SettingsPanel() {
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [confirmReset, setConfirmReset] = useState(false);
 
-  // ── 55. Export full app state ─────────────────────────────────────────────
+  // ── Export full app state ─────────────────────────────────────────────────
   const handleExportState = () => {
     const state = useStore.getState();
     const exportable = {
-      trades:          state.trades,
-      strategies:      state.strategies,
+      trades:           state.trades,
+      strategies:       state.strategies,
       activeStrategyId: state.activeStrategyId,
-      chartDrawings:   state.chartDrawings,
-      priceAlerts:     state.priceAlerts,
-      paperAccount:    { ...state.paperAccount, openPositions: [] },
+      chartDrawings:    state.chartDrawings,
+      priceAlerts:      state.priceAlerts,
+      paperAccount:     { ...state.paperAccount, openPositions: [] },
       settings: {
         theme:            state.theme,
         defaultSym:       state.defaultSym,
@@ -91,6 +91,8 @@ export default function SettingsPanel() {
         atrTrailMult:     state.atrTrailMult,
         soundEnabled:     state.soundEnabled,
         notifEnabled:     state.notifEnabled,
+        // maxDailyLossUsd is exported alongside settings for round-trip fidelity
+        // but must be restored via setMaxDailyLossUsd() on import (ChartSlice field)
         maxDailyLossUsd:  state.maxDailyLossUsd,
         rrRatio:          state.rrRatio,
         leverage:         state.leverage,
@@ -108,7 +110,7 @@ export default function SettingsPanel() {
     toast.success('App state exported');
   };
 
-  // ── 56. Import full app state ─────────────────────────────────────────────
+  // ── Import full app state ─────────────────────────────────────────────────
   const handleImportState = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -117,7 +119,9 @@ export default function SettingsPanel() {
       try {
         const data = JSON.parse(ev.target?.result as string);
         const s = data.settings ?? {};
-        // Apply settings
+
+        // Apply SettingsSlice fields — maxDailyLossUsd deliberately excluded here
+        // because it lives in ChartSlice, not SettingsSlice.
         useStore.getState().setSettings({
           theme:            s.theme,
           defaultSym:       s.defaultSym,
@@ -131,13 +135,21 @@ export default function SettingsPanel() {
           atrTrailMult:     s.atrTrailMult,
           soundEnabled:     s.soundEnabled,
           notifEnabled:     s.notifEnabled,
-          maxDailyLossUsd:  s.maxDailyLossUsd,
+          // ↑ DO NOT add maxDailyLossUsd here — it is a ChartSlice field
         });
-        if (data.trades)     useStore.setState({ trades: data.trades });
-        if (data.strategies) useStore.setState({ strategies: data.strategies, activeStrategyId: data.activeStrategyId ?? null });
+
+        // maxDailyLossUsd is in ChartSlice → use its dedicated action
+        if (typeof s.maxDailyLossUsd === 'number') {
+          useStore.getState().setMaxDailyLossUsd(s.maxDailyLossUsd);
+        }
+
+        // Restore remaining slices
+        if (data.trades)        useStore.setState({ trades: data.trades });
+        if (data.strategies)    useStore.setState({ strategies: data.strategies, activeStrategyId: data.activeStrategyId ?? null });
         if (data.chartDrawings) useStore.setState({ chartDrawings: data.chartDrawings });
         if (data.priceAlerts)   useStore.setState({ priceAlerts: data.priceAlerts });
         if (data.paperAccount)  useStore.setState({ paperAccount: data.paperAccount });
+
         toast.success('App state imported');
       } catch {
         toast.error('Invalid backup file');
@@ -224,9 +236,9 @@ export default function SettingsPanel() {
           </div>
         </Row>
 
-        <NumRow label="Default Leverage" value={defaultLeverage} onChange={v => setSettings({ defaultLeverage: v })} min={1} max={125} />
-        <NumRow label="Default Capital ($)" value={defaultCapital} onChange={v => setSettings({ defaultCapital: v })} min={1} step={10} />
-        <NumRow label="Default R:R Ratio" value={defaultRR} onChange={v => setSettings({ defaultRR: v })} min={0.5} max={10} step={0.5} />
+        <NumRow label="Default Leverage"     value={defaultLeverage} onChange={v => setSettings({ defaultLeverage: v })} min={1} max={125} />
+        <NumRow label="Default Capital ($)"  value={defaultCapital}  onChange={v => setSettings({ defaultCapital: v })}  min={1} step={10} />
+        <NumRow label="Default R:R Ratio"    value={defaultRR}       onChange={v => setSettings({ defaultRR: v })}       min={0.5} max={10} step={0.5} />
 
         <Row label="Default Fee Type">
           <div style={{ display: 'flex', gap: 4 }}>
@@ -275,7 +287,6 @@ export default function SettingsPanel() {
       <div style={{ marginBottom: 20 }}>
         <div style={{ fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 700, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.08em', marginBottom: 8 }}>Data</div>
 
-        {/* Full JSON export/import */}
         <Row label="App State Backup">
           <div style={{ display: 'flex', gap: 6 }}>
             <ActionBtn variant="green" onClick={handleExportState}>⬇ Export JSON</ActionBtn>
@@ -290,10 +301,16 @@ export default function SettingsPanel() {
           </div>
         </Row>
 
-        {/* Trade CSV */}
         <Row label="Trade Journal CSV">
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            <ActionBtn onClick={() => { const csv = exportTradesCsv(); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'trades.csv'; a.click(); toast.success('Trades exported'); }}>
+            <ActionBtn onClick={() => {
+              const csv = exportTradesCsv();
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+              a.download = 'trades.csv';
+              a.click();
+              toast.success('Trades exported');
+            }}>
               ⬇ Export CSV
             </ActionBtn>
             <div style={{ display: 'flex', gap: 3 }}>
