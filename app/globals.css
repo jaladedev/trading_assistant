@@ -29,6 +29,163 @@
   --ema20:     #4da6ff;
   --ema50:     #a78bff;
   --nav-w:     220px;
+  --content-px: 16px;
+  --col-gap:    10px;
+}
+
+@media (max-width: 640px) {
+  :root {
+    --content-px: 10px;
+    --col-gap:    8px;
+    --nav-w:      0px;
+  }
+}
+
+/* ── Main layout ──────────────────────────────────────────────────────────── */
+/* page.tsx uses inline style maxWidth:1000, margin:0 auto — override on mobile */
+main {
+  padding-left:  var(--content-px) !important;
+  padding-right: var(--content-px) !important;
+}
+
+/* ── Header wraps on small screens ───────────────────────────────────────── */
+@media (max-width: 640px) {
+  header {
+    gap: 6px !important;
+    padding: 8px var(--content-px) !important;
+  }
+
+  /* Live price shrinks */
+  header .live-price {
+    font-size: 16px !important;
+  }
+
+  /* Timeframe pills scroll horizontally instead of wrapping */
+  nav[data-onboard="tabs"] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap !important;
+    gap: 2px !important;
+    padding: 6px var(--content-px) !important;
+  }
+
+  nav[data-onboard="tabs"] button {
+    flex-shrink: 0;
+    padding: 6px 12px !important;
+    font-size: 10px !important;
+  }
+
+  /* Keyboard shortcut hints hidden on mobile */
+  nav[data-onboard="tabs"] > div:last-child {
+    display: none !important;
+  }
+}
+
+/* ── 2-column grids collapse to 1 column on mobile ───────────────────────── */
+@media (max-width: 600px) {
+  /* SuggestionCard + EntryZones row */
+  [style*="gridTemplateColumns: '1fr 1fr'"],
+  [style*='gridTemplateColumns: "1fr 1fr"'],
+  [style*="grid-template-columns: 1fr 1fr"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* 4-column grids (position price levels) → 2 columns */
+  [style*="gridTemplateColumns: 'repeat(4,1fr)'"],
+  [style*='gridTemplateColumns: "repeat(4,1fr)"'],
+  [style*="grid-template-columns: repeat(4,1fr)"] {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  /* Account stats row in PaperTradingPanel: 4 → 2 */
+  [style*="gridTemplateColumns: 'repeat(4,1fr)'"] {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+/* ── Chart canvas: constrain height on mobile ─────────────────────────────── */
+@media (max-width: 640px) {
+  canvas[style*="height: 240"] {
+    height: 200px !important;
+  }
+  canvas[style*="height: 340"] {
+    height: 260px !important;
+  }
+}
+
+/* ── Sub-pane row tabs: scroll horizontally ───────────────────────────────── */
+@media (max-width: 640px) {
+  /* The chart sub-section tab row */
+  div[style*="borderBottom: '1px solid var(--border)'"] {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap !important;
+  }
+}
+
+/* ── Cards: reduce padding on mobile ─────────────────────────────────────── */
+@media (max-width: 480px) {
+  /* .card equivalent — bg2 bg3 with border and borderRadius */
+  [style*="borderRadius: 'var(--radius)'"],
+  [style*='borderRadius: "var(--radius)"'] {
+    padding: 8px !important;
+  }
+}
+
+/* ── Screener table: horizontal scroll ────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Screener panel results table */
+  table {
+    min-width: 500px;
+  }
+
+  /* Wrap the table in a scroll container — handled inline in ScreenerPanel,
+     but this ensures overflow is visible */
+  div[style*="overflowX: 'auto'"] {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ── Strategy builder: full width on mobile ───────────────────────────────── */
+@media (max-width: 640px) {
+  div[style*="maxWidth: 760"] {
+    max-width: 100% !important;
+  }
+}
+
+/* ── Floating tooltip / command palette ───────────────────────────────────── */
+@media (max-width: 480px) {
+  /* CommandPalette: full-width on small screens */
+  [style*="maxWidth: 560"] {
+    max-width: calc(100vw - 20px) !important;
+    left: 10px !important;
+    right: 10px !important;
+  }
+}
+
+/* ── Touch targets: minimum 44px tap area ─────────────────────────────────── */
+@media (max-width: 640px) {
+  button {
+    min-height: 32px;
+  }
+
+  /* Larger font for inputs on mobile to prevent iOS zoom */
+  input, select, textarea {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
+/* ── Hide non-essential elements on very small screens ─────────────────────── */
+@media (max-width: 380px) {
+  /* Connection label text (keep the dot) */
+  header .conn-label {
+    display: none;
+  }
+
+  /* Day change % in header */
+  header .day-change {
+    display: none;
+  }
 }
 
 *, *::before, *::after {

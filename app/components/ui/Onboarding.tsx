@@ -160,20 +160,44 @@ export default function Onboarding() {
 
   useEffect(() => {
     if (!current || !visible) return;
-    const target = document.querySelector(current.target);
-    const tw = tooltipRef.current?.offsetWidth  ?? 280;
-    const th = tooltipRef.current?.offsetHeight ?? 120;
-    setPos(getPosition(target, current.placement, tw, th));
+
+    const updatePos = () => {
+      const target = document.querySelector(current.target);
+      const tw = tooltipRef.current?.offsetWidth  ?? 280;
+      const th = tooltipRef.current?.offsetHeight ?? 120;
+      setPos(getPosition(target, current.placement, tw, th));
+    };
+
+    // Initial position
+    updatePos();
 
     // Highlight target
+    const target = document.querySelector(current.target);
     if (target) {
-      (target as HTMLElement).style.outline = '2px solid var(--accent)';
+      (target as HTMLElement).style.outline       = '2px solid var(--accent)';
       (target as HTMLElement).style.outlineOffset = '3px';
-      (target as HTMLElement).style.borderRadius = '4px';
+      (target as HTMLElement).style.borderRadius  = '4px';
     }
+
+    // Track target movement on scroll / resize
+    window.addEventListener('scroll', updatePos, true);   // capture = catches nested scrollers
+    window.addEventListener('resize', updatePos);
+
+    // Also observe the target element itself for size/position changes
+    let ro: ResizeObserver | null = null;
+    if (target) {
+      ro = new ResizeObserver(updatePos);
+      ro.observe(target);
+      // Also observe the document body so layout shifts are caught
+      ro.observe(document.body);
+    }
+
     return () => {
+      window.removeEventListener('scroll', updatePos, true);
+      window.removeEventListener('resize', updatePos);
+      ro?.disconnect();
       if (target) {
-        (target as HTMLElement).style.outline = '';
+        (target as HTMLElement).style.outline       = '';
         (target as HTMLElement).style.outlineOffset = '';
       }
     };

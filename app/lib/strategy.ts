@@ -83,14 +83,19 @@ export interface TakeProfitConfig {
 export type SizingMethod =
   | 'fixed_usd'        // fixed $ amount per trade
   | 'fixed_pct'        // fixed % of capital
-  | 'risk_pct';        // risk X% of capital (auto-size from SL distance)
+  | 'risk_pct'      // risk X% of capital (auto-size from SL distance)
+  | 'kelly';          //  Kelly Criterion: size = kellyPct * capital
 
 export interface SizingConfig {
   method:       SizingMethod;
-  value:        number;    // $ or %
-  maxPerTrade:  number;    // cap position size in $
-  maxOpen:      number;    // max concurrent positions (0 = unlimited)
-  maxDailyLoss: number;    // kill switch in $ (0 = disabled)
+  value:        number;      // $ or % — for kelly: not used (auto-computed)
+  kellyWinRate: number;      // win rate 0-1, used when method === 'kelly'
+  kellyAvgWinR: number;      // avg win in R, used when method === 'kelly'
+  kellyAvgLossR:number;      // avg loss in R, used when method === 'kelly'
+  kellyFraction:number;      // 0.5 = half-Kelly (default), 1.0 = full Kelly
+  maxPerTrade:  number;      // cap position size in $
+  maxOpen:      number;      // max concurrent positions (0 = unlimited)
+  maxDailyLoss: number;      // kill switch in $ (0 = disabled)
 }
 
 // ── Full strategy ─────────────────────────────────────────────────────────────
@@ -147,10 +152,17 @@ const defaultTP: TakeProfitConfig = {
   ],
 };
 
-const defaultSizing: SizingConfig = {
-  method: 'risk_pct', value: 1, maxPerTrade: 500, maxOpen: 1, maxDailyLoss: 0,
+export const patchedDefaultSizing: SizingConfig = {
+  method:        'risk_pct',
+  value:         1,
+  kellyWinRate:  0.55,
+  kellyAvgWinR:  1.5,
+  kellyAvgLossR: 1.0,
+  kellyFraction: 0.5,
+  maxPerTrade:   500,
+  maxOpen:       1,
+  maxDailyLoss:  0,
 };
-
 export const PRESET_STRATEGIES: Strategy[] = [
   {
     id: 'preset-3ema',
@@ -180,7 +192,7 @@ export const PRESET_STRATEGIES: Strategy[] = [
     exitRules: null,
     stop:       defaultStop,
     takeProfit: defaultTP,
-    sizing:     defaultSizing,
+    sizing:     patchedDefaultSizing,
   },
   {
     id: 'preset-bb-bounce',
@@ -212,7 +224,7 @@ export const PRESET_STRATEGIES: Strategy[] = [
     },
     stop: { type: 'atr_multiple', value: 1.5, breakEvenAt: 0.8, trailAfter: 0, trailType: 'atr_multiple', trailValue: 1 },
     takeProfit: { targets: [{ rrMultiple: 1, sizePercent: 60 }, { rrMultiple: 2, sizePercent: 40 }] },
-    sizing: defaultSizing,
+    sizing: patchedDefaultSizing,
   },
   {
     id: 'preset-macd-cross',
@@ -243,7 +255,7 @@ export const PRESET_STRATEGIES: Strategy[] = [
     },
     stop:       { type: 'atr_multiple', value: 2.5, breakEvenAt: 1, trailAfter: 2, trailType: 'atr_multiple', trailValue: 2 },
     takeProfit: defaultTP,
-    sizing:     defaultSizing,
+    sizing:     patchedDefaultSizing,
   },
   {
     id: 'preset-rsi-reversion',
@@ -272,7 +284,7 @@ export const PRESET_STRATEGIES: Strategy[] = [
     },
     stop:       { type: 'fixed_pct', value: 3, breakEvenAt: 0, trailAfter: 0, trailType: 'fixed_pct', trailValue: 1 },
     takeProfit: { targets: [{ rrMultiple: 1.5, sizePercent: 100 }] },
-    sizing:     defaultSizing,
+    sizing:     patchedDefaultSizing,
   },
   {
     id: 'preset-supertrend',
@@ -303,7 +315,7 @@ export const PRESET_STRATEGIES: Strategy[] = [
     },
     stop:       { type: 'atr_multiple', value: 2, breakEvenAt: 1, trailAfter: 1.5, trailType: 'atr_multiple', trailValue: 1.5 },
     takeProfit: defaultTP,
-    sizing:     defaultSizing,
+    sizing:     patchedDefaultSizing,
   },
 ];
 
@@ -488,6 +500,11 @@ export function calcStopPrice(
 }
 
 // ── Position size calculator ──────────────────────────────────────────────────
+export function calcKelly(winRate: number, avgWinR: number, avgLossR: number): number {
+  if (avgWinR <= 0 || avgLossR <= 0 || winRate <= 0) return 0;
+  return winRate / avgLossR - (1 - winRate) / avgWinR;
+}
+ 
 export function calcPositionSize(
   entry: number,
   stopPrice: number,
@@ -495,21 +512,46 @@ export function calcPositionSize(
   sizing: SizingConfig,
 ): number {
   let size = 0;
+ 
   switch (sizing.method) {
     case 'fixed_usd':
       size = sizing.value;
       break;
+ 
     case 'fixed_pct':
       size = capital * sizing.value / 100;
       break;
+ 
     case 'risk_pct': {
-      const riskAmt  = capital * sizing.value / 100;
+      const riskAmt     = capital * sizing.value / 100;
       const riskPerUnit = Math.abs(entry - stopPrice);
-      const tokens   = riskPerUnit > 0 ? riskAmt / riskPerUnit : 0;
+      const tokens      = riskPerUnit > 0 ? riskAmt / riskPerUnit : 0;
       size = tokens * entry;
       break;
     }
+ 
+    case 'kelly': {
+      // Compute Kelly fraction
+      const wr   = sizing.kellyWinRate  ?? 0.5;
+      const awR  = sizing.kellyAvgWinR  ?? 1.5;
+      const alR  = sizing.kellyAvgLossR ?? 1.0;
+      const frac = sizing.kellyFraction ?? 0.5;   // default half-Kelly
+      const rawKelly = calcKelly(wr, awR, alR);
+      // rawKelly is a fraction of capital to risk per trade
+      // We clamp at 25% max regardless of Kelly output
+      const kellyPct = Math.max(0, Math.min(rawKelly * frac, 0.25));
+      // Convert from risk% → position size via SL distance
+      const riskAmt     = capital * kellyPct;
+      const riskPerUnit = Math.abs(entry - stopPrice);
+      const tokens      = riskPerUnit > 0 ? riskAmt / riskPerUnit : 0;
+      size = tokens * entry;
+      break;
+    }
+ 
+    default:
+      size = 0;
   }
+ 
   if (sizing.maxPerTrade > 0) size = Math.min(size, sizing.maxPerTrade);
   return Math.max(0, size);
 }
@@ -586,6 +628,9 @@ export function buildSnapshot(
     vwapVals: (number | null)[];
     cvdCumDeltas: number[];
     patterns: { name: string; bull: boolean; label: string }[][];
+    e9s:  (number | null)[]; 
+    e20s: (number | null)[]; 
+    e50s: (number | null)[];
   }
 ): IndicatorSnapshot {
   const last = <T>(arr: T[]): T | null => arr.length ? arr[arr.length - 1] : null;
@@ -647,9 +692,9 @@ export function buildSnapshot(
       open:    prevBar.o,
       high:    prevBar.h,
       low:     prevBar.l,
-      ema9:    prevLast(storeState.rsiVals) !== undefined ? storeState.e9 : null,
-      ema20:   storeState.e20,
-      ema50:   storeState.e50,
+      ema9:    prevLast(storeState.e9s) !== undefined ? storeState.e9 : null,
+      ema20:   prevLast(storeState.e20s) !== undefined ? storeState.e20 : null,
+      ema50:   prevLast(storeState.e50s) !== undefined ? storeState.e50 : null,
       rsi:     prevLast(storeState.rsiVals),
       stochK:  prevLast(storeState.stochRsiK),
       stochD:  prevLast(storeState.stochRsiD),

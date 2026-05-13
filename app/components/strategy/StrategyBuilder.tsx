@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useStore } from '@/lib/store';
 import {
   Strategy, Rule, EntryCondition, StopConfig, TakeProfitConfig, SizingConfig,
@@ -68,9 +68,16 @@ const defaultTP: TakeProfitConfig = {
   ],
 };
 
-const defaultSizing: SizingConfig = {
-  method: 'risk_pct', value: 1,
-  maxPerTrade: 500, maxOpen: 1, maxDailyLoss: 0,
+const patchedDefaultSizing: SizingConfig = {
+  method:        'risk_pct',
+  value:         1,
+  kellyWinRate:  0.55,
+  kellyAvgWinR:  1.5,
+  kellyAvgLossR: 1.0,
+  kellyFraction: 0.5,
+  maxPerTrade:   500,
+  maxOpen:       1,
+  maxDailyLoss:  0,
 };
 
 function makeStrategy(name = 'New Strategy'): Strategy {
@@ -82,7 +89,7 @@ function makeStrategy(name = 'New Strategy'): Strategy {
     exitRules:  null,
     stop:       { ...defaultStop },
     takeProfit: { targets: [...defaultTP.targets.map(t => ({ ...t })) ] },
-    sizing:     { ...defaultSizing },
+    sizing:     { ...patchedDefaultSizing },
   };
 }
 
@@ -530,10 +537,33 @@ export default function StrategyBuilder() {
   const {
     strategies, activeStrategyId,
     addStrategy, updateStrategy, deleteStrategy, setActiveStrategy,
-    livePrice, capital,
-    strategySignal,
+    importStrategy,
+    livePrice, capital, strategySignal,
   } = useStore();
 
+  const importFileRef = useRef<HTMLInputElement>(null);
+  const [importError, setImportError]   = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState(false);
+
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const json = ev.target?.result as string;
+      const result = importStrategy(json);
+      if (result.ok) {
+        setImportSuccess(true);
+        setImportError(null);
+        setTimeout(() => setImportSuccess(false), 2000);
+      } else {
+        setImportError(result.error ?? 'Import failed');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+  
   const [editId, setEditId]       = useState<string | null>(null);
   const [showPresets, setPresets] = useState(false);
   const [section, setSection]     = useState<'long' | 'short' | 'exit' | 'stop' | 'tp' | 'sizing'>('long');
@@ -590,7 +620,7 @@ export default function StrategyBuilder() {
     { key: 'tp',     label: 'Take Profit' },
     { key: 'sizing', label: 'Sizing' },
   ];
-
+  
   // ── Strategy card ──────────────────────────────────────────────────────────
   const StratCard = ({ s, isPreset }: { s: Strategy; isPreset: boolean }) => {
     const isActive = s.id === activeStrategyId;
@@ -796,8 +826,38 @@ export default function StrategyBuilder() {
   return (
     <div>
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 13, fontFamily: 'var(--mono)', fontWeight: 700 }}>My Strategies</span>
+
+        {/* hidden file input */}
+        <input
+          ref={importFileRef}
+          type="file"
+          accept=".json,application/json"
+          style={{ display: 'none' }}
+          onChange={handleImportFile}
+        />
+
+        <button
+          onClick={() => importFileRef.current?.click()}
+          style={{
+            padding: '6px 14px', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+            borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+            border: importSuccess ? '1px solid var(--green)' : '1px solid var(--border2)',
+            background: importSuccess ? 'rgba(0,229,160,0.1)' : 'var(--bg3)',
+            color: importSuccess ? 'var(--green)' : 'var(--text2)',
+            transition: 'all .15s',
+          }}
+        >
+          {importSuccess ? '✓ Imported' : '⬆ Import JSON'}
+        </button>
+
+        {importError && (
+          <span style={{ fontSize: 9, fontFamily: 'var(--mono)', color: 'var(--red)' }}>
+            {importError}
+          </span>
+        )}
+
         <button
           onClick={() => { const s = makeStrategy(); addStrategy(s); startEdit(s); }}
           style={{
@@ -807,6 +867,7 @@ export default function StrategyBuilder() {
           }}
         >+ New Strategy</button>
       </div>
+
 
       {/* Active signal banner */}
       {strategySignal && (

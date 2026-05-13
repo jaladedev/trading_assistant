@@ -21,6 +21,7 @@ import { useTheme } from '@/components/ui/ThemeToggle';
 import { toast } from '@/components/ui/Toast';
 import { fmtPrice, fmtSymDisplay } from '@/lib/indicators';
 import ScreenerPanel from '@/components/screener/ScreenerPanel';
+import PaperTradingPanel from '@/components/chart/PaperTradingPanel';
 
 // ── Symbol catalogue ──────────────────────────────────────────────────────────
 const PRESET_SYMS = ['BTCUSDT','ETHUSDT','SOLUSDT','XRPUSDT','BNBUSDT','TONUSDT'];
@@ -185,10 +186,14 @@ export default function Home() {
 
   useTheme();
 
+  useEffect(() => {
+    useStore.getState().hydrateTradesFromIdb();
+  }, []);
+
   const [paletteOpen,    setPaletteOpen]    = useState(false);
   const [indicatorOpen,  setIndicatorOpen]  = useState(false);
   // Which chart sub-section is expanded below the chart
-  const [chartSection,   setChartSection]   = useState<'analysis' | 'session' | 'alerts' | 'backtest'>('analysis');
+  const [chartSection, setChartSection] = useState<'analysis' | 'session' | 'alerts' | 'backtest' | 'paper'>('analysis');
 
   const symbolInputRef = useRef<HTMLInputElement>(null);
   const lastKlineLoad  = useRef(0);
@@ -324,6 +329,7 @@ export default function Home() {
           <button
             onClick={() => setIndicatorOpen(true)}
             title="Configure indicators"
+            data-onboard="indicators-btn"     
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
               padding: '4px 10px', fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
@@ -438,6 +444,7 @@ export default function Home() {
                 ['session',  '📊 Session P&L'],
                 ['alerts',   '🔔 Alerts'],
                 ['backtest', '⚙ Backtest'],
+                ['paper',    '📝 Paper Trade'],
               ] as const).map(([key, label]) => (
                 <button
                   key={key}
@@ -462,6 +469,7 @@ export default function Home() {
             {chartSection === 'session'  && <SessionPnL />}
             {chartSection === 'alerts'   && <PriceAlerts />}
             {chartSection === 'backtest' && <BacktestPanel />}
+            {chartSection === 'paper'    && <PaperTradingPanel />}
           </div>
         )}
 

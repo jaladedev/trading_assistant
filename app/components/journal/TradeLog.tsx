@@ -298,6 +298,81 @@ function TagSelector({ tags, onChange }: { tags: string[]; onChange: (t: string[
     </div>
   );
 }
+export function CsvImportButton() {
+  const { importTradesCsv } = useStore();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [mode, setMode]       = useState<'merge' | 'replace'>('merge');
+  const [status, setStatus]   = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setLoading(true);
+    setStatus(null);
+    try {
+      const text   = await file.text();
+      const result = await importTradesCsv(text, mode);
+      setStatus(`✓ Imported ${result.count} trades${result.errors ? ` (${result.errors} skipped)` : ''}`);
+    } catch (err) {
+      setStatus(`✗ ${String(err)}`);
+    }
+    setLoading(false);
+    e.target.value = '';
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+      {/* Mode toggle */}
+      {(['merge', 'replace'] as const).map(m => (
+        <button
+          key={m}
+          onClick={() => setMode(m)}
+          style={{
+            fontSize: 9, fontFamily: 'var(--mono)', padding: '2px 8px',
+            borderRadius: 6, cursor: 'pointer',
+            border: `1px solid ${mode === m ? 'var(--accent)' : 'var(--border2)'}`,
+            background: mode === m ? 'rgba(0,229,160,0.1)' : 'var(--bg3)',
+            color: mode === m ? 'var(--accent)' : 'var(--text3)',
+          }}
+        >
+          {m}
+        </button>
+      ))}
+
+      {/* File picker */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: 'none' }}
+        onChange={handleFile}
+      />
+      <button
+        onClick={() => fileRef.current?.click()}
+        disabled={loading}
+        style={{
+          fontSize: 10, fontFamily: 'var(--mono)', fontWeight: 600,
+          padding: '4px 10px', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          border: '1px solid var(--border2)', background: 'var(--bg3)', color: 'var(--text2)',
+          opacity: loading ? 0.6 : 1,
+        }}
+      >
+        {loading ? '…' : '⬆ Import CSV'}
+      </button>
+
+      {/* Status */}
+      {status && (
+        <span style={{
+          fontSize: 9, fontFamily: 'var(--mono)',
+          color: status.startsWith('✓') ? 'var(--green)' : 'var(--red)',
+        }}>
+          {status}
+        </span>
+      )}
+    </div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main TradeLog component

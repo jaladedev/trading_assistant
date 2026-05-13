@@ -511,8 +511,14 @@ export const useStore = create<StoreState>()(
 
       setChartDrawings: (d) => set({ chartDrawings: d }),
 
-      setSym: (sym) => { get().resetChartState(); set({ sym }); },
-      setTf:  (tf)  => { get().resetChartState(); set({ tf }); },
+      setSym: (sym) => set(s => {
+        resetIndicatorState();
+        return { ...makeDefaultChartSlice(), sym, tf: s.tf, paperAccount: s.paperAccount };
+      }),
+      setTf: (tf) => set(s => {
+        resetIndicatorState();
+        return { ...makeDefaultChartSlice(), sym: s.sym, tf, paperAccount: s.paperAccount };
+      }),
 
       // Step 4: resetChartState now also resets module-level indicator state
       resetChartState: () => {
@@ -573,8 +579,8 @@ export const useStore = create<StoreState>()(
 
         let newCrossovers = [...s.crossovers];
         if (prevE9 !== null && ind.e20 !== null) {
-          const bull = prevE9 <= s.e20! && newE9 > newE20;
-          const bear = prevE9 >= s.e20! && newE9 < newE20;
+        const bull = prevE9 <= ind.e20 && newE9 > newE20;
+        const bear = prevE9 >= ind.e20 && newE9 < newE20;
           if (bull || bear) {
             newCrossovers.push({ type: bull ? 'bull' : 'bear', price: c.c, idx: s.candles.length, time: Date.now() });
             if (newCrossovers.length > 8) newCrossovers.shift();
