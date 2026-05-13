@@ -450,7 +450,7 @@ export default function Home() {
             </div>
 
             {/* Sub-section content */}
-            {chartSection === 'analysis' && (
+            {/* {chartSection === 'analysis' && (
               <>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   <div data-onboard="suggestion-card"><SuggestionCard /></div>
@@ -458,7 +458,7 @@ export default function Home() {
                 </div>
                 <CrossoverLog />
               </>
-            )}
+            )} */}
             {chartSection === 'session'  && <SessionPnL />}
             {chartSection === 'alerts'   && <PriceAlerts />}
             {chartSection === 'backtest' && <BacktestPanel />}
