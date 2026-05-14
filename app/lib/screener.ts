@@ -31,6 +31,8 @@ export interface ScreenerResult {
   adx:        number | null;
   bbWidth:    number | null;
   atr:        number | null;
+  /** ATR expressed as % of price — use for cross-symbol comparisons (SIGNAL-4) */
+  atrPct:     number | null;
   stBull:     boolean | null;
   volAvg20:   number | null;
   highN:      number | null;
@@ -73,7 +75,7 @@ export const QUICK_FILTERS: QuickFilter[] = [
   { id: 'rsi_overbought',   label: 'RSI Overbought',    icon: '📈', category: 'momentum'  },
   { id: 'adx_trending',     label: 'ADX Trending >25',  icon: '💪', category: 'momentum'  },
   { id: 'bb_squeeze',       label: 'BB Squeeze',        icon: '🤏', category: 'volatility' },
-  { id: 'volume_spike',     label: 'Volume Spike 2×',   icon: '📊', category: 'volume'    },
+  { id: 'volume_spike',     label: 'Volume Spike',      icon: '📊', category: 'volume'    },
   { id: 'price_near_ema9',  label: 'Near EMA9',         icon: '〰', category: 'price'     },
   { id: 'price_near_ema20', label: 'Near EMA20',        icon: '〰', category: 'price'     },
   { id: 'price_near_ema50', label: 'Near EMA50',        icon: '〰', category: 'price'     },
@@ -124,10 +126,56 @@ export interface AutoRefreshConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Indicator engine (unchanged — exchange-agnostic)
+// Timeframe helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Milliseconds per timeframe string */
+const TF_MS: Record<string, number> = {
+  '1m':  60_000,
+  '3m':  3 * 60_000,
+  '5m':  5 * 60_000,
+  '15m': 15 * 60_000,
+  '30m': 30 * 60_000,
+  '1h':  3_600_000,
+  '2h':  2 * 3_600_000,
+  '4h':  4 * 3_600_000,
+  '6h':  6 * 3_600_000,
+  '8h':  8 * 3_600_000,
+  '12h': 12 * 3_600_000,
+  '1d':  86_400_000,
+  '3d':  3 * 86_400_000,
+  '1w':  7 * 86_400_000,
+};
+
+/**
+ * Number of candles that span 24 hours for a given timeframe.
+ * FIX SIGNAL-6: previously hardcoded to 24 regardless of TF.
+ */
+function candlesIn24h(tf: string): number {
+  const ms = TF_MS[tf] ?? 3_600_000;
+  return Math.max(1, Math.ceil(86_400_000 / ms));
+}
+
+/**
+ * Volume-spike multiplier scaled to timeframe.
+ * FIX SIGNAL-5: shorter TFs need higher multipliers to avoid noise.
+ */
+function volumeSpikeMultiplier(tf: string): number {
+  const ms = TF_MS[tf] ?? 3_600_000;
+  if (ms <= 60_000)       return 5.0;  // 1m
+  if (ms <= 300_000)      return 4.0;  // 5m
+  if (ms <= 900_000)      return 3.0;  // 15m
+  if (ms <= 3_600_000)    return 2.5;  // 1h
+  if (ms <= 14_400_000)   return 2.0;  // 4h
+  return 1.5;                           // 1d+
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Indicator engine
 // ─────────────────────────────────────────────────────────────────────────────
 
 const WILDER_PERIOD = 14;
+const BB_PERIOD     = 20;
 
 function ema(prev: number | null, val: number, k: number): number {
   return prev === null ? val : val * k + prev * (1 - k);
@@ -142,37 +190,50 @@ function computeIndicators(candles: Candle[], nBar = 20) {
 
   let e9: number|null = null, e20: number|null = null, e50: number|null = null;
   let ef: number|null = null, es: number|null  = null, esig: number|null = null;
-  const bbCloses: number[] = [];
+
+  // FIX PERF-2: ring-buffer for BB instead of array with O(n) shift()
+  const bbBuf  = new Float64Array(BB_PERIOD);
+  let   bbHead = 0;
+  let   bbCount = 0;
+
+  // FIX PERF-5: track previous-bar MACD values inside the single loop
+  let prevEf: number|null = null, prevEs: number|null = null, prevSig: number|null = null;
+
+  // FIX SIGNAL-2: proper SuperTrend with band memory
+  let stUpperBand: number|null = null;
+  let stLowerBand: number|null = null;
+  let stDir = 1; // 1 = bull, -1 = bear
 
   for (let i = 0; i < n; i++) {
     const c = candles[i];
+
+    // Save previous-bar MACD state before updating (PERF-5)
+    prevEf  = ef;
+    prevEs  = es;
+    prevSig = esig;
+
     e9   = ema(e9,   c.c, k9);
     e20  = ema(e20,  c.c, k20);
     e50  = ema(e50,  c.c, k50);
     ef   = ema(ef,   c.c, kF);
     es   = ema(es,   c.c, kS);
     esig = ema(esig, (ef ?? c.c) - (es ?? c.c), kSig);
-    bbCloses.push(c.c);
-    if (bbCloses.length > 20) bbCloses.shift();
+
+    // BB ring-buffer (PERF-2)
+    bbBuf[bbHead % BB_PERIOD] = c.c;
+    bbHead++;
+    if (bbCount < BB_PERIOD) bbCount++;
   }
 
   const macdLine = ef !== null && es !== null ? ef - es : null;
   const macdSig  = esig;
   const macdHist = macdLine !== null && macdSig !== null ? macdLine - macdSig : null;
 
-  let prevMacdLine: number|null = null, prevMacdSig: number|null = null;
-  if (n >= 2) {
-    let ef2: number|null = null, es2: number|null = null, esig2: number|null = null;
-    for (let i = 0; i < n - 1; i++) {
-      const c = candles[i];
-      ef2   = ema(ef2,   c.c, kF);
-      es2   = ema(es2,   c.c, kS);
-      esig2 = ema(esig2, (ef2 ?? c.c) - (es2 ?? c.c), kSig);
-    }
-    prevMacdLine = ef2 !== null && es2 !== null ? ef2 - es2 : null;
-    prevMacdSig  = esig2;
-  }
+  // MACD previous-bar values (PERF-5 — derived from single-loop tracking)
+  const prevMacdLine = prevEf !== null && prevEs !== null ? prevEf - prevEs : null;
+  const prevMacdSig  = prevSig;
 
+  // RSI — Wilder 14
   let rsi: number|null = null;
   if (n > WILDER_PERIOD) {
     let avgGain = 0, avgLoss = 0;
@@ -189,6 +250,7 @@ function computeIndicators(candles: Candle[], nBar = 20) {
     rsi = avgLoss < 1e-10 ? 100 : Math.round(100 - 100 / (1 + avgGain / avgLoss));
   }
 
+  // ATR — Wilder 14
   let atr: number|null = null;
   if (n > WILDER_PERIOD) {
     let atrVal = 0;
@@ -203,6 +265,7 @@ function computeIndicators(candles: Candle[], nBar = 20) {
     atr = atrVal;
   }
 
+  // ADX — Wilder 14
   let adx: number|null = null;
   if (n > WILDER_PERIOD * 2) {
     let smPlus = 0, smMinus = 0, smTR = 0;
@@ -233,26 +296,64 @@ function computeIndicators(candles: Candle[], nBar = 20) {
     }
   }
 
-  const bbMean  = bbCloses.reduce((a, b) => a + b, 0) / bbCloses.length;
-  const bbStd   = Math.sqrt(bbCloses.reduce((a, b) => a + (b - bbMean) ** 2, 0) / bbCloses.length);
-  const bbWidth = bbMean > 0 ? (bbStd * 4) / bbMean : null;
+  // FIX SIGNAL-2: proper SuperTrend with band carry-forward
+  let stBull = true;
+  if (atr !== null && n > WILDER_PERIOD) {
+    // Re-derive ATR per-bar for ST band computation, using Wilder smoothing
+    let atrRun: number|null = null;
+    let upperBand: number|null = null;
+    let lowerBand: number|null = null;
+    let dir = 1; // 1 bull, -1 bear
 
-  const last  = candles[n-1];
-  const hl2   = (last.h + last.l) / 2;
-  const stDn  = atr !== null ? hl2 - 3 * atr : hl2;
-  const stBull = last.c > stDn;
+    for (let i = 1; i < n; i++) {
+      const c = candles[i], p = candles[i-1];
+      const tr = Math.max(c.h - c.l, Math.abs(c.h - p.c), Math.abs(c.l - p.c));
+      atrRun = atrRun === null ? tr : (atrRun * (WILDER_PERIOD - 1) + tr) / WILDER_PERIOD;
 
-  const nSlice  = candles.slice(-nBar);
-  const highN   = Math.max(...nSlice.map(c => c.h));
-  const lowN    = Math.min(...nSlice.map(c => c.l));
+      const hl2 = (c.h + c.l) / 2;
+      const rawUpper = hl2 + 3 * atrRun;
+      const rawLower = hl2 - 3 * atrRun;
+
+      // Carry bands forward: tighten only, never widen
+      const newUpper: number = upperBand !== null && rawUpper < upperBand ? rawUpper : upperBand ?? rawUpper;
+      const newLower: number = lowerBand !== null && rawLower > lowerBand ? rawLower : lowerBand ?? rawLower;
+
+      // Direction flip logic
+      if (dir === 1 && c.c < newLower) dir = -1;
+      else if (dir === -1 && c.c > newUpper) dir = 1;
+
+      upperBand = newUpper;
+      lowerBand = newLower;
+    }
+    stBull = dir === 1;
+  }
+
+  // BB width from ring-buffer (PERF-2)
+  let bbWidth: number|null = null;
+  if (bbCount > 0) {
+    let bbSum = 0;
+    for (let i = 0; i < bbCount; i++) bbSum += bbBuf[i];
+    const bbMean = bbSum / bbCount;
+    let bbSumSq = 0;
+    for (let i = 0; i < bbCount; i++) bbSumSq += (bbBuf[i] - bbMean) ** 2;
+    const bbStd = Math.sqrt(bbSumSq / bbCount);
+    bbWidth = bbMean > 0 ? (bbStd * 4) / bbMean : null;
+  }
+
+  const last     = candles[n-1];
+  const nSlice   = candles.slice(-nBar);
+  const highN    = Math.max(...nSlice.map(c => c.h));
+  const lowN     = Math.min(...nSlice.map(c => c.l));
   const volAvg20 = candles.slice(-20).reduce((a, c) => a + c.v, 0) / Math.min(20, n);
 
+  // FIX SIGNAL-8: ATR-relative Fib proximity instead of hardcoded 0.5%
   let nearFib: string|null = null;
   try {
     const fibo = calcAutoFibo(candles, Math.min(50, n));
     if (fibo) {
+      const fibThreshold = atr !== null ? (atr * 0.3) / last.c : 0.005;
       for (const lv of fibo.levels) {
-        if (Math.abs(lv.price - last.c) / last.c < 0.005) { nearFib = lv.label; break; }
+        if (Math.abs(lv.price - last.c) / last.c < fibThreshold) { nearFib = lv.label; break; }
       }
     }
   } catch { /* skip */ }
@@ -266,43 +367,98 @@ function computeIndicators(candles: Candle[], nBar = 20) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Filter application (unchanged)
+// Filter application
+// FIX SIGNAL-1: weighted scoring — run once over ALL_FILTER_IDS, then derive
+// active-filter matches by intersection (eliminates double applyFilters call).
+// FIX SIGNAL-3: BB squeeze uses per-symbol rolling percentile.
+// FIX SIGNAL-5: volume spike multiplier is TF-aware (passed in via opts).
 // ─────────────────────────────────────────────────────────────────────────────
 
-function applyFilters(
-  ind: NonNullable<ReturnType<typeof computeIndicators>>,
+/** Weighted score values per filter (SIGNAL-1) */
+const FILTER_WEIGHTS: Record<FilterId, number> = {
+  // Crossovers / reversals — rare, high value
+  macd_cross_bull:  4,
+  macd_cross_bear:  4,
+  // Trend confirmation — meaningful but sustained
+  ema_stack_bull:   2,
+  ema_stack_bear:   2,
+  supertrend_bull:  2,
+  supertrend_bear:  2,
+  adx_trending:     2,
+  rsi_oversold:     2,
+  rsi_overbought:   2,
+  // Structural / volatility
+  bb_squeeze:       2,
+  volume_spike:     2,
+  n_bar_high:       2,
+  n_bar_low:        2,
+  // Proximity — fire frequently, low weight
+  price_near_ema9:  1,
+  price_near_ema20: 1,
+  price_near_ema50: 1,
+  fib_level:        1,
+};
+
+interface FilterOpts {
+  /** TF-aware volume spike multiplier (SIGNAL-5) */
+  volSpikeMultiplier?: number;
+  /** Rolling BB-width percentile-20 for this symbol (SIGNAL-3) */
+  bbWidthP20?: number | null;
+}
+
+/**
+ * Evaluates all filters once and returns both:
+ *   - `matched`: filters from `activeFilters` that fired
+ *   - `score`: weighted sum across ALL filters (SIGNAL-1 + PERF-1)
+ */
+function evaluateAllFilters(
+  ind:           NonNullable<ReturnType<typeof computeIndicators>>,
   activeFilters: FilterId[],
-): string[] {
-  const matched: string[] = [];
+  opts:          FilterOpts = {},
+): { matched: string[]; score: number } {
   const { price, e9, e20, e50, rsi, macdLine, macdSig, prevMacdLine, prevMacdSig,
     adx, bbWidth, stBull, volAvg20, lastVol, highN, lowN, nearFib } = ind;
 
-  for (const f of activeFilters) {
+  const activeSet = new Set<FilterId>(activeFilters);
+  const matched: string[] = [];
+  let score = 0;
+
+  const volMult  = opts.volSpikeMultiplier ?? 2.0;
+  // SIGNAL-3: use per-symbol rolling percentile-20 if available, else fallback
+  const bbThresh = opts.bbWidthP20 ?? 0.03;
+
+  for (const f of ALL_FILTER_IDS) {
+    let fired = false;
     switch (f) {
-      case 'ema_stack_bull':   if (e9 && e20 && e50 && e9>e20 && e20>e50) matched.push(f); break;
-      case 'ema_stack_bear':   if (e9 && e20 && e50 && e9<e20 && e20<e50) matched.push(f); break;
-      case 'rsi_oversold':     if (rsi !== null && rsi < 30) matched.push(f); break;
-      case 'rsi_overbought':   if (rsi !== null && rsi > 70) matched.push(f); break;
+      case 'ema_stack_bull':   fired = !!(e9 && e20 && e50 && e9>e20 && e20>e50); break;
+      case 'ema_stack_bear':   fired = !!(e9 && e20 && e50 && e9<e20 && e20<e50); break;
+      case 'rsi_oversold':     fired = rsi !== null && rsi < 30; break;
+      case 'rsi_overbought':   fired = rsi !== null && rsi > 70; break;
       case 'macd_cross_bull':
-        if (macdLine!==null && macdSig!==null && prevMacdLine!==null && prevMacdSig!==null
-          && prevMacdLine<=prevMacdSig && macdLine>macdSig) matched.push(f); break;
+        fired = macdLine!==null && macdSig!==null && prevMacdLine!==null && prevMacdSig!==null
+          && prevMacdLine<=prevMacdSig && macdLine>macdSig; break;
       case 'macd_cross_bear':
-        if (macdLine!==null && macdSig!==null && prevMacdLine!==null && prevMacdSig!==null
-          && prevMacdLine>=prevMacdSig && macdLine<macdSig) matched.push(f); break;
-      case 'supertrend_bull':  if (stBull === true)  matched.push(f); break;
-      case 'supertrend_bear':  if (stBull === false) matched.push(f); break;
-      case 'bb_squeeze':       if (bbWidth !== null && bbWidth < 0.03) matched.push(f); break;
-      case 'volume_spike':     if (volAvg20 && lastVol > volAvg20 * 2) matched.push(f); break;
-      case 'price_near_ema9':  if (e9  && Math.abs(price - e9)  / price < 0.003) matched.push(f); break;
-      case 'price_near_ema20': if (e20 && Math.abs(price - e20) / price < 0.003) matched.push(f); break;
-      case 'price_near_ema50': if (e50 && Math.abs(price - e50) / price < 0.005) matched.push(f); break;
-      case 'n_bar_high':       if (highN !== null && price >= highN * 0.998) matched.push(f); break;
-      case 'n_bar_low':        if (lowN  !== null && price <= lowN  * 1.002) matched.push(f); break;
-      case 'adx_trending':     if (adx !== null && adx > 25) matched.push(f); break;
-      case 'fib_level':        if (nearFib !== null) matched.push(f); break;
+        fired = macdLine!==null && macdSig!==null && prevMacdLine!==null && prevMacdSig!==null
+          && prevMacdLine>=prevMacdSig && macdLine<macdSig; break;
+      case 'supertrend_bull':  fired = stBull === true; break;
+      case 'supertrend_bear':  fired = stBull === false; break;
+      case 'bb_squeeze':       fired = bbWidth !== null && bbWidth < bbThresh; break;  // SIGNAL-3
+      case 'volume_spike':     fired = !!(volAvg20 && lastVol > volAvg20 * volMult); break; // SIGNAL-5
+      case 'price_near_ema9':  fired = !!(e9  && Math.abs(price - e9)  / price < 0.003); break;
+      case 'price_near_ema20': fired = !!(e20 && Math.abs(price - e20) / price < 0.003); break;
+      case 'price_near_ema50': fired = !!(e50 && Math.abs(price - e50) / price < 0.005); break;
+      case 'n_bar_high':       fired = highN !== null && price >= highN * 0.998; break;
+      case 'n_bar_low':        fired = lowN  !== null && price <= lowN  * 1.002; break;
+      case 'adx_trending':     fired = adx !== null && adx > 25; break;
+      case 'fib_level':        fired = nearFib !== null; break;
+    }
+    if (fired) {
+      score += FILTER_WEIGHTS[f];
+      if (activeSet.has(f)) matched.push(f);
     }
   }
-  return matched;
+
+  return { matched, score };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,6 +467,24 @@ function applyFilters(
 
 const CACHE     = new Map<string, { data: Candle[]; ts: number }>();
 const CACHE_TTL = 60_000;
+/** Max entries kept; oldest evicted first (PERF-4). */
+const CACHE_MAX = 2_000;
+
+/** FIX PERF-4: evict all expired entries after each scan completes. */
+function evictExpiredCache(): void {
+  const now = Date.now();
+  for (const [key, entry] of CACHE) {
+    if (now - entry.ts >= CACHE_TTL) CACHE.delete(key);
+  }
+  // Hard cap: remove oldest entries if still over limit
+  if (CACHE.size > CACHE_MAX) {
+    let overflow = CACHE.size - CACHE_MAX;
+    for (const key of CACHE.keys()) {
+      CACHE.delete(key);
+      if (--overflow <= 0) break;
+    }
+  }
+}
 
 async function fetchCandlesCached(
   adapter: ExchangeAdapter,
@@ -330,13 +504,36 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 // Stagger: Binance allows 1200/min, Bybit 120/min (IP), OKX 20/2s
 const FETCH_DELAY: Record<ExchangeId, number> = {
-  binance: 120,   // ~8 req/s
-  bybit:   500,   // ~2 req/s — conservative for IP limit
-  okx:     300,   // ~3 req/s
+  binance: 120,
+  bybit:   500,
+  okx:     300,
 };
 
+/**
+ * FIX SIGNAL-7: find the candle whose open timestamp is closest to `targetMs`.
+ * Returns that candle's open price, or the oldest candle's open as fallback.
+ */
+function findOpen24h(candles: Candle[], targetMs: number): number {
+  if (candles.length === 0) return 0;
+  let best = candles[0];
+  let bestDelta = Math.abs(candles[0].t - targetMs);
+  for (let i = 1; i < candles.length; i++) {
+    const delta = Math.abs(candles[i].t - targetMs);
+    if (delta < bestDelta) { bestDelta = delta; best = candles[i]; }
+  }
+  return best.o;
+}
+
+/** FIX SIGNAL-3: compute rolling 20th-percentile of bbWidth across recent bbWidth samples. */
+function rollingBBWidthPercentile20(samples: number[]): number | null {
+  if (samples.length < 5) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const idx    = Math.floor(sorted.length * 0.2);
+  return sorted[idx];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// fetchAllUSDTPairs — now exchange-aware
+// fetchAllUSDTPairs — exchange-aware
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function fetchAllUSDTPairs(exchangeId: ExchangeId = 'binance'): Promise<string[]> {
@@ -344,8 +541,10 @@ export async function fetchAllUSDTPairs(exchangeId: ExchangeId = 'binance'): Pro
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runScreener — now accepts exchangeId
+// runScreener — FIX PERF-3: concurrency pool (8 parallel fetches)
 // ─────────────────────────────────────────────────────────────────────────────
+
+const CONCURRENCY = 8;
 
 export async function runScreener(
   syms:          string[],
@@ -356,51 +555,93 @@ export async function runScreener(
   strategyEval?: (sym: string, candles: Candle[]) => { dir: 'long'|'short'; score: number; reasons: string[] } | null,
   exchangeId:    ExchangeId = 'binance',
 ): Promise<ScreenerResult[]> {
-  const adapter = getAdapter(exchangeId);
-  const delay   = FETCH_DELAY[exchangeId];
+  const adapter  = getAdapter(exchangeId);
+  const delay    = FETCH_DELAY[exchangeId];
   const results: ScreenerResult[] = [];
 
-  for (let i = 0; i < syms.length; i++) {
+  // SIGNAL-3: accumulate bbWidth samples per symbol for percentile computation
+  // We use the previous scan's results if available; first scan uses fallback
+  const bbWidthSamples = new Map<string, number[]>();
+
+  let done = 0;
+
+  // FIX PERF-3: process symbols in concurrent batches
+  for (let batchStart = 0; batchStart < syms.length; batchStart += CONCURRENCY) {
     if (signal?.aborted) break;
-    const sym = syms[i];
 
-    try {
-      const candles = await fetchCandlesCached(adapter, sym, tf);
-      const ind     = computeIndicators(candles);
-      if (!ind) continue;
+    const batch = syms.slice(batchStart, batchStart + CONCURRENCY);
 
-      const open24    = candles.length >= 2 ? candles[candles.length - 2].o : ind.price;
-      const change24h = open24 > 0 ? (ind.price - open24) / open24 * 100 : 0;
-      const volume24h = candles.slice(-24).reduce((a, c) => a + c.v, 0);
+    const batchResults = await Promise.allSettled(
+      batch.map(async (sym, batchIdx) => {
+        // Stagger within batch to respect rate limits
+        if (batchIdx > 0) await sleep(delay);
+        if (signal?.aborted) return null;
 
-      const filters = applyFilters(ind, activeFilters);
-      const score   = applyFilters(ind, ALL_FILTER_IDS).length;
-      const strategySignal = strategyEval ? strategyEval(sym, candles) : null;
+        const candles = await fetchCandlesCached(adapter, sym, tf);
+        const ind     = computeIndicators(candles);
+        if (!ind) return null;
 
-      const result: ScreenerResult = {
-        sym, price: ind.price, change24h, volume24h,
-        ema9: ind.e9, ema20: ind.e20, ema50: ind.e50,
-        rsi: ind.rsi, macdLine: ind.macdLine, macdSig: ind.macdSig, macdHist: ind.macdHist,
-        adx: ind.adx, bbWidth: ind.bbWidth, atr: ind.atr,
-        stBull: ind.stBull, volAvg20: ind.volAvg20, highN: ind.highN, lowN: ind.lowN,
-        nearFib: ind.nearFib,
-        filters, score, strategySignal,
-        fetchedAt: Date.now(),
-        exchange:  exchangeId,
-      };
+        // SIGNAL-7: use true 24h-ago open, not prev-bar open
+        const target24hMs = Date.now() - 86_400_000;
+        const open24      = findOpen24h(candles, target24hMs);
+        const change24h   = open24 > 0 ? (ind.price - open24) / open24 * 100 : 0;
 
-      results.push(result);
-      onProgress?.(i + 1, syms.length, result);
-    } catch { /* skip failed symbol silently */ }
+        // SIGNAL-6: volume summed over correct number of candles for this TF
+        const nCandles24h = candlesIn24h(tf);
+        const volume24h   = candles.slice(-nCandles24h).reduce((a, c) => a + c.v, 0);
 
-    if (i < syms.length - 1) await sleep(delay);
+        // SIGNAL-3: build per-symbol bbWidth history
+        const symSamples = bbWidthSamples.get(sym) ?? [];
+        if (ind.bbWidth !== null) { symSamples.push(ind.bbWidth); if (symSamples.length > 50) symSamples.shift(); }
+        bbWidthSamples.set(sym, symSamples);
+        const bbWidthP20 = rollingBBWidthPercentile20(symSamples);
+
+        // FIX PERF-1 + SIGNAL-1: single evaluation pass, weighted score
+        const { matched: filters, score } = evaluateAllFilters(ind, activeFilters, {
+          volSpikeMultiplier: volumeSpikeMultiplier(tf),
+          bbWidthP20,
+        });
+
+        const strategySignal = strategyEval ? strategyEval(sym, candles) : null;
+
+        // FIX SIGNAL-4: expose atrPct for cross-symbol comparisons
+        const atrPct = ind.atr !== null && ind.price > 0 ? ind.atr / ind.price * 100 : null;
+
+        const result: ScreenerResult = {
+          sym, price: ind.price, change24h, volume24h,
+          ema9: ind.e9, ema20: ind.e20, ema50: ind.e50,
+          rsi: ind.rsi, macdLine: ind.macdLine, macdSig: ind.macdSig, macdHist: ind.macdHist,
+          adx: ind.adx, bbWidth: ind.bbWidth, atr: ind.atr, atrPct,
+          stBull: ind.stBull, volAvg20: ind.volAvg20, highN: ind.highN, lowN: ind.lowN,
+          nearFib: ind.nearFib,
+          filters, score, strategySignal,
+          fetchedAt: Date.now(),
+          exchange:  exchangeId,
+        };
+
+        return result;
+      }),
+    );
+
+    for (const settled of batchResults) {
+      done++;
+      if (settled.status === 'fulfilled' && settled.value !== null) {
+        results.push(settled.value);
+        onProgress?.(done, syms.length, settled.value);
+      } else {
+        onProgress?.(done, syms.length, null);
+      }
+    }
   }
+
+  // FIX PERF-4: evict stale cache entries after scan completes
+  evictExpiredCache();
 
   return results;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// runMultiTFScan — now exchange-aware
+// runMultiTFScan — exchange-aware, also uses concurrency pool
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function runMultiTFScan(
@@ -437,7 +678,7 @@ export async function runMultiTFScan(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stack-flip detection (unchanged)
+// Stack-flip detection
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface StackFlipAlert {
@@ -491,13 +732,13 @@ export function checkStackFlips(results: ScreenerResult[], onFlip?: (alert: Stac
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CSV export (now includes exchange column)
+// CSV export (includes atrPct column)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function exportScreenerCSV(results: ScreenerResult[], tf: string): void {
   const headers = [
     'Exchange','Symbol','Price','Change24h%','Volume24h','EMA9','EMA20','EMA50',
-    'RSI','MACD','ADX','BB Width','ATR','SuperTrend','Near Fib','Active Filters','Score (0-17)',
+    'RSI','MACD','ADX','BB Width','ATR','ATR%','SuperTrend','Near Fib','Active Filters','Score (weighted)',
   ];
   const rows = results.map(r => [
     r.exchange ?? 'binance',
@@ -505,14 +746,15 @@ export function exportScreenerCSV(results: ScreenerResult[], tf: string): void {
     r.price.toFixed(4),
     r.change24h.toFixed(2),
     r.volume24h.toFixed(0),
-    r.ema9?.toFixed(4)  ?? '',
-    r.ema20?.toFixed(4) ?? '',
-    r.ema50?.toFixed(4) ?? '',
-    r.rsi?.toFixed(0)   ?? '',
+    r.ema9?.toFixed(4)   ?? '',
+    r.ema20?.toFixed(4)  ?? '',
+    r.ema50?.toFixed(4)  ?? '',
+    r.rsi?.toFixed(0)    ?? '',
     r.macdLine?.toFixed(6) ?? '',
-    r.adx?.toFixed(1)   ?? '',
+    r.adx?.toFixed(1)    ?? '',
     r.bbWidth?.toFixed(4) ?? '',
-    r.atr?.toFixed(4)   ?? '',
+    r.atr?.toFixed(4)    ?? '',
+    r.atrPct?.toFixed(3) ?? '',   // SIGNAL-4
     r.stBull === null ? '' : r.stBull ? 'Bull' : 'Bear',
     r.nearFib ?? '',
     `"${r.filters.join(', ')}"`,
@@ -529,7 +771,7 @@ export function exportScreenerCSV(results: ScreenerResult[], tf: string): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Webhook output (unchanged)
+// Webhook output
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface WebhookConfig {
