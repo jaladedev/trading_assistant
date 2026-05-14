@@ -1,17 +1,40 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useScreenerStore } from '@/lib/screenerStore';
 import { useStore } from '@/lib/store';
 import { QUICK_FILTERS, type FilterId, type ScreenerResult, type ScreenerView } from '@/lib/screener';
 import { PRESET_STRATEGIES } from '@/lib/strategy';
+import { EXCHANGE_LABELS, type ExchangeId } from '@/lib/exchangeAdapters';
 
 const MONO: React.CSSProperties = { fontFamily: 'var(--mono)' };
-const f = (v: number | null, d = 2) => v == null ? '—' : v.toFixed(d);
+const f    = (v: number | null, d = 2) => v == null ? '—' : v.toFixed(d);
 const fmtP = (v: number) => v > 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : v.toFixed(v > 10 ? 2 : 4);
 const fmtK = (v: number) => v >= 1e9 ? (v/1e9).toFixed(1)+'B' : v >= 1e6 ? (v/1e6).toFixed(1)+'M' : v >= 1e3 ? (v/1e3).toFixed(1)+'K' : v.toFixed(0);
 
-const TF_OPTIONS = ['1m','5m','15m','1h','4h','1d'];
+const TF_OPTIONS = ['1m','5m','15m','30m','1h','4h','1d'];
+const estMins    = (n: number) => (n * 0.12 / 60).toFixed(0);
+
+// Per-exchange rate estimates for the banner
+const EXCHANGE_DELAY_SEC: Record<ExchangeId, number> = {
+  binance: 0.12,
+  bybit:   0.5,
+  okx:     0.3,
+};
+
+// Exchange brand colours (used only for the active pill border)
+const EXCHANGE_COLOR: Record<ExchangeId, string> = {
+  binance: '#f0b90b',
+  bybit:   '#f7a600',
+  okx:     '#ffffff',
+};
+
+// Exchange logo text (emoji stand-ins — swap for real SVGs if desired)
+const EXCHANGE_ICON: Record<ExchangeId, string> = {
+  binance: '🟡',
+  bybit:   '🟠',
+  okx:     '⚪',
+};
 
 const COL = {
   bull: '#00e5a0', bear: '#ff3d5a', amber: '#ffb82e',
@@ -21,7 +44,8 @@ const COL = {
 // ── Sortable column header ─────────────────────────────────────────────────────
 function Th({ col, label, sortCol, sortDir, onSort }: {
   col: keyof ScreenerResult; label: string;
-  sortCol: keyof ScreenerResult; sortDir: 'asc'|'desc'; onSort: (c: keyof ScreenerResult) => void;
+  sortCol: keyof ScreenerResult; sortDir: 'asc'|'desc';
+  onSort: (c: keyof ScreenerResult) => void;
 }) {
   const active = sortCol === col;
   return (
@@ -37,24 +61,52 @@ function Th({ col, label, sortCol, sortDir, onSort }: {
   );
 }
 
+// ── Exchange badge (tiny pill shown in table rows) ────────────────────────────
+function ExBadge({ ex }: { ex: ExchangeId }) {
+  const color = EXCHANGE_COLOR[ex] ?? COL.text3;
+  return (
+    <span style={{
+      ...MONO, fontSize: 7, padding: '1px 5px', borderRadius: 8,
+      border: `1px solid ${color}44`,
+      background: `${color}11`,
+      color,
+      textTransform: 'uppercase',
+      letterSpacing: '.04em',
+    }}>
+      {ex}
+    </span>
+  );
+}
+
 // ── Heatmap cell ──────────────────────────────────────────────────────────────
 function HeatmapCell({ r, onClick }: { r: ScreenerResult; onClick: () => void }) {
   const bull = r.ema9 && r.ema20 && r.ema50 && r.ema9 > r.ema20 && r.ema20 > r.ema50;
   const bear = r.ema9 && r.ema20 && r.ema50 && r.ema9 < r.ema20 && r.ema20 < r.ema50;
   const bg   = bull ? 'rgba(0,229,160,0.12)' : bear ? 'rgba(255,61,90,0.12)' : 'rgba(255,255,255,0.04)';
-  const bdr  = bull ? 'rgba(0,229,160,0.4)' : bear ? 'rgba(255,61,90,0.4)' : 'var(--border)';
+  const bdr  = bull ? 'rgba(0,229,160,0.4)'  : bear ? 'rgba(255,61,90,0.4)'  : 'var(--border)';
   return (
     <div onClick={onClick} style={{
       background: bg, border: `1px solid ${bdr}`, borderRadius: 6,
       padding: '8px 10px', cursor: 'pointer', minWidth: 120,
     }}>
-      <div style={{ ...MONO, fontSize: 10, fontWeight: 700, color: 'var(--text)' }}>{r.sym.replace('USDT','')}</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ ...MONO, fontSize: 10, fontWeight: 700, color: 'var(--text)' }}>
+          {r.sym.replace('USDT','')}
+        </span>
+        <ExBadge ex={r.exchange ?? 'binance'} />
+      </div>
       <div style={{ ...MONO, fontSize: 11, fontWeight: 700, color: r.change24h >= 0 ? COL.bull : COL.bear, marginTop: 2 }}>
         {r.change24h >= 0 ? '+' : ''}{r.change24h.toFixed(2)}%
       </div>
       <div style={{ ...MONO, fontSize: 9, color: COL.text2, marginTop: 3 }}>{fmtP(r.price)}</div>
-      {r.rsi != null && <div style={{ ...MONO, fontSize: 8, color: r.rsi > 70 ? COL.bear : r.rsi < 30 ? COL.bull : COL.amber }}>RSI {r.rsi}</div>}
-      {r.score > 0 && <div style={{ ...MONO, fontSize: 8, color: COL.purple }}>{r.score} match{r.score !== 1 ? 'es' : ''}</div>}
+      {r.rsi != null && (
+        <div style={{ ...MONO, fontSize: 8, color: r.rsi > 70 ? COL.bear : r.rsi < 30 ? COL.bull : COL.amber }}>
+          RSI {r.rsi}
+        </div>
+      )}
+      {r.score > 0 && (
+        <div style={{ ...MONO, fontSize: 8, color: COL.purple }}>{r.score}/17</div>
+      )}
     </div>
   );
 }
@@ -64,15 +116,20 @@ function MTFRow({ r, onClick }: { r: ScreenerResult; onClick: () => void }) {
   const tfs = ['5m','1h','4h'];
   return (
     <tr onClick={onClick} style={{ cursor: 'pointer' }}>
-      <td style={{ ...MONO, fontSize: 10, fontWeight: 700, padding: '6px 8px', color: 'var(--text)' }}>{r.sym.replace('USDT','')}</td>
+      <td style={{ ...MONO, fontSize: 10, fontWeight: 700, padding: '6px 8px', color: 'var(--text)' }}>
+        {r.sym.replace('USDT','')}
+      </td>
+      <td style={{ ...MONO, fontSize: 9, padding: '6px 4px' }}>
+        <ExBadge ex={r.exchange ?? 'binance'} />
+      </td>
       <td style={{ ...MONO, fontSize: 10, padding: '6px 8px', color: COL.text2 }}>{fmtP(r.price)}</td>
       {tfs.map(tf => {
-        const mtfData = r.mtf?.[tf];
-        const col = !mtfData ? COL.text3 : mtfData.trend === 'bull' ? COL.bull : mtfData.trend === 'bear' ? COL.bear : COL.text2;
+        const d   = r.mtf?.[tf];
+        const col = !d ? COL.text3 : d.trend === 'bull' ? COL.bull : d.trend === 'bear' ? COL.bear : COL.text2;
         return (
           <td key={tf} style={{ ...MONO, fontSize: 10, padding: '6px 8px', textAlign: 'center', color: col }}>
-            {!mtfData ? '—' : mtfData.trend === 'bull' ? '▲' : mtfData.trend === 'bear' ? '▼' : '—'}
-            {mtfData?.rsi != null && <span style={{ fontSize: 8, color: COL.text3, marginLeft: 3 }}>{mtfData.rsi}</span>}
+            {!d ? '—' : d.trend === 'bull' ? '▲' : d.trend === 'bear' ? '▼' : '—'}
+            {d?.rsi != null && <span style={{ fontSize: 8, color: COL.text3, marginLeft: 3 }}>{d.rsi}</span>}
           </td>
         );
       })}
@@ -81,20 +138,62 @@ function MTFRow({ r, onClick }: { r: ScreenerResult; onClick: () => void }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Exchange Selector Component
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ExchangeSelector({ current, onChange }: { current: ExchangeId; onChange: (id: ExchangeId) => void }) {
+  const exchanges: ExchangeId[] = ['binance', 'bybit', 'okx'];
+  return (
+    <div style={{
+      display: 'flex', gap: 3,
+      background: 'var(--bg3)', border: '1px solid var(--border)',
+      borderRadius: 8, padding: 3,
+    }}>
+      {exchanges.map(ex => {
+        const active = current === ex;
+        const color  = EXCHANGE_COLOR[ex];
+        return (
+          <button
+            key={ex}
+            onClick={() => onChange(ex)}
+            title={EXCHANGE_LABELS[ex]}
+            style={{
+              ...MONO,
+              fontSize: 9,
+              padding: '3px 9px',
+              borderRadius: 6,
+              cursor: 'pointer',
+              border: active ? `1px solid ${color}66` : '1px solid transparent',
+              background: active ? `${color}18` : 'transparent',
+              color: active ? color : 'var(--text3)',
+              fontWeight: active ? 700 : 400,
+              letterSpacing: '.04em',
+              transition: 'all 0.15s ease',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            <span>{EXCHANGE_ICON[ex]}</span>
+            {EXCHANGE_LABELS[ex]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main ScreenerPanel
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function ScreenerPanel() {
-  const sc = useScreenerStore();
+  const sc        = useScreenerStore();
   const mainStore = useStore();
-  const [tab, setTab] = useState<'screener'|'watchlist'|'webhooks'|'kelly'>('screener');
+  const [tab, setTab]           = useState<'screener'|'watchlist'|'webhooks'|'kelly'>('screener');
   const [webhookForm, setWebhookForm] = useState({ name:'', type:'discord' as 'discord'|'telegram'|'custom', url:'', chatId:'' });
-  const [importJson, setImportJson] = useState('');
-  const [importErr, setImportErr] = useState('');
-  const [newWlName, setNewWlName] = useState('');
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [newWlName, setNewWlName]     = useState('');
 
-  // Auto-refresh ticker
   useEffect(() => {
     const id = setInterval(() => sc.tickAutoRefresh(), 1000);
     return () => clearInterval(id);
@@ -102,31 +201,47 @@ export default function ScreenerPanel() {
 
   const handleLoadSymbol = (sym: string) => {
     mainStore.setSym(sym);
-    mainStore.resetChartState();
+    mainStore.resetChartState?.();
   };
 
   const countdown = sc.autoRefresh.enabled && sc.autoRefresh.nextRefresh
     ? Math.max(0, Math.round((sc.autoRefresh.nextRefresh - Date.now()) / 1000))
     : null;
 
-  const activeWl = sc.watchlists.find(w => w.id === sc.activeWatchlistId);
+  const activeWl  = sc.watchlists.find(w => w.id === sc.activeWatchlistId);
   const allStrats = [...PRESET_STRATEGIES, ...mainStore.strategies ?? []];
 
   const btnStyle = (active: boolean, color?: string): React.CSSProperties => ({
     ...MONO, fontSize: 10, padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
-    border: `1px solid ${active ? (color || 'var(--accent)') : 'var(--border2)'}`,
+    border:     `1px solid ${active ? (color || 'var(--accent)') : 'var(--border2)'}`,
     background: active ? (color ? color + '22' : 'rgba(0,229,160,0.1)') : 'var(--bg3)',
-    color: active ? (color || 'var(--accent)') : 'var(--text3)',
+    color:      active ? (color || 'var(--accent)') : 'var(--text3)',
     fontWeight: active ? 700 : 400,
   });
 
-  // ── Tab bar ────────────────────────────────────────────────────────────────
+  const progressLabel = () => {
+    if (sc.fetchingPairs) return `Fetching ${EXCHANGE_LABELS[sc.exchange]} pairs…`;
+    if (sc.screenerRunning) return `${sc.screenerProgress.done} / ${sc.screenerProgress.total}`;
+    return null;
+  };
+
+  // Estimated scan time using per-exchange delay
+  const estScanMins = (n: number) => {
+    const delay = EXCHANGE_DELAY_SEC[sc.exchange] ?? 0.12;
+    return (n * delay / 60).toFixed(0);
+  };
+
   return (
     <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
-        <span style={{ ...MONO, fontSize: 11, fontWeight: 700, color: 'var(--text)', letterSpacing: '.04em' }}>📡 Screener</span>
+      {/* ── Header ────────────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '10px 14px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap',
+      }}>
+        <span style={{ ...MONO, fontSize: 11, fontWeight: 700, color: 'var(--text)', letterSpacing: '.04em' }}>
+          📡 Screener
+        </span>
         {(['screener','watchlist','webhooks','kelly'] as const).map(t => (
           <button key={t} onClick={() => setTab(t)} style={btnStyle(tab === t)}>
             {t === 'kelly' ? '📐 Kelly' : t === 'webhooks' ? '🔗 Webhooks' : t === 'watchlist' ? '👁 Watchlist' : '🔍 Scan'}
@@ -137,82 +252,162 @@ export default function ScreenerPanel() {
         </span>
       </div>
 
-      {/* ── SCREENER TAB ────────────────────────────────────────────────────── */}
+      {/* ── SCREENER TAB ──────────────────────────────────────────────────── */}
       {tab === 'screener' && (
         <div style={{ padding: 12 }}>
 
-          {/* Controls row */}
+          {/* ── Exchange selector row ────────────────────────────────────── */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+            <span style={{ ...MONO, fontSize: 9, color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '.06em' }}>
+              Exchange
+            </span>
+            <ExchangeSelector current={sc.exchange} onChange={sc.setExchange} />
+
+            {/* Rate-limit hint */}
+            <span style={{ ...MONO, fontSize: 8, color: 'var(--text3)', marginLeft: 4 }}>
+              {sc.exchange === 'binance' && '~8 req/s'}
+              {sc.exchange === 'bybit'   && '~2 req/s (IP limit)'}
+              {sc.exchange === 'okx'     && '~3 req/s'}
+            </span>
+          </div>
+
+          {/* ── Top controls row ─────────────────────────────────────────── */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-            {/* TF selector */}
+            {/* TF */}
             <select value={sc.screenerTf} onChange={e => sc.setScreenerTf(e.target.value)}
               style={{ ...MONO, fontSize: 10, padding: '4px 8px', borderRadius: 6, background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)' }}>
               {TF_OPTIONS.map(tf => <option key={tf} value={tf}>{tf}</option>)}
             </select>
 
-            {/* View toggle —  */}
+            {/* View toggle */}
             {(['table','heatmap','multitf'] as ScreenerView[]).map(v => (
               <button key={v} onClick={() => sc.setScreenerView(v)} style={btnStyle(sc.screenerView === v)}>
                 {v === 'table' ? '≡ Table' : v === 'heatmap' ? '■ Heatmap' : '⊞ Multi-TF'}
               </button>
             ))}
 
-            {/* Strategy scan —  */}
+            {/* Strategy */}
             <select value={sc.scanStrategyId ?? ''} onChange={e => sc.setScanStrategy(e.target.value || null)}
               style={{ ...MONO, fontSize: 10, padding: '4px 8px', borderRadius: 6, background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)' }}>
               <option value=''>Strategy: None</option>
               {allStrats.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
 
-            {/* Run/abort */}
-            <button onClick={sc.screenerRunning ? sc.abortScan : sc.runScan}
-              style={{ ...btnStyle(!sc.screenerRunning, sc.screenerRunning ? '#ff3d5a' : undefined), marginLeft: 'auto' }}>
-              {sc.screenerRunning ? `⏹ Abort (${sc.screenerProgress.done}/${sc.screenerProgress.total})` : '▶ Run Scan'}
+            {/* All-pairs toggle */}
+            <button
+              onClick={() => sc.setAllPairsMode(!sc.allPairsMode)}
+              style={btnStyle(sc.allPairsMode, COL.blue)}
+              title={`Screen every USDT pair on ${EXCHANGE_LABELS[sc.exchange]}`}
+            >
+              🌍 {sc.allPairsMode
+                ? `All Pairs${sc.allPairsCount ? ` (${sc.allPairsCount})` : ''}`
+                : 'All Pairs'}
             </button>
 
-            {/* Auto-refresh —  */}
+            {/* Run / abort */}
+            <button
+              onClick={sc.screenerRunning ? sc.abortScan : sc.runScan}
+              style={{ ...btnStyle(!sc.screenerRunning, sc.screenerRunning ? '#ff3d5a' : undefined), marginLeft: 'auto' }}
+            >
+              {sc.screenerRunning
+                ? `⏹ Abort (${progressLabel()})`
+                : '▶ Run Scan'}
+            </button>
+
+            {/* Auto-refresh */}
             <button onClick={() => sc.setAutoRefresh(!sc.autoRefresh.enabled)} style={btnStyle(sc.autoRefresh.enabled, COL.amber)}>
               {sc.autoRefresh.enabled ? `↺ Auto ${countdown !== null ? countdown+'s' : ''}` : '↺ Auto'}
             </button>
 
-            {/* Export CSV —  */}
+            {/* CSV */}
             <button onClick={sc.exportCSV} style={btnStyle(false)} title="Export CSV">⬇ CSV</button>
           </div>
 
-          {/* Quick filters —  */}
+          {/* ── All-pairs mode banner ────────────────────────────────────── */}
+          {sc.allPairsMode && (
+            <div style={{
+              marginBottom: 10, padding: '8px 12px',
+              background: 'rgba(77,166,255,0.07)', border: '1px solid rgba(77,166,255,0.25)',
+              borderRadius: 6, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+            }}>
+              <span style={{ ...MONO, fontSize: 9, color: COL.blue, fontWeight: 700 }}>
+                🌍 ALL PAIRS MODE — {EXCHANGE_LABELS[sc.exchange].toUpperCase()}
+              </span>
+              <span style={{ ...MONO, fontSize: 9, color: COL.text2 }}>
+                {sc.allPairsCount > 0 ? `${sc.allPairsCount} pairs` : 'pair count TBD'} · est.{' '}
+                {estScanMins(sc.allPairsCount || 300)} min at {sc.screenerTf} TF.
+              </span>
+
+              {/* Min-volume filter */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 'auto' }}>
+                <span style={{ ...MONO, fontSize: 9, color: COL.text3 }}>Min Vol (USDT):</span>
+                {[0, 1e6, 5e6, 10e6].map(v => (
+                  <button key={v}
+                    onClick={() => sc.setAllPairsMinVol(v)}
+                    style={btnStyle(sc.allPairsMinVol === v, COL.blue)}
+                  >
+                    {v === 0 ? 'All' : v >= 1e6 ? `${v/1e6}M` : v}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Fetch-pairs progress ─────────────────────────────────────── */}
+          {sc.fetchingPairs && (
+            <div style={{ ...MONO, fontSize: 10, color: COL.blue, marginBottom: 8,
+              padding: '6px 10px', background: 'rgba(77,166,255,0.07)', borderRadius: 6 }}>
+              ⏳ Fetching all USDT pairs from {EXCHANGE_LABELS[sc.exchange]}…
+            </div>
+          )}
+
+          {/* ── Quick filters ────────────────────────────────────────────── */}
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
-            {QUICK_FILTERS.map(f => (
-              <button key={f.id} onClick={() => sc.toggleFilter(f.id as FilterId)}
+            {QUICK_FILTERS.map(qf => (
+              <button key={qf.id} onClick={() => sc.toggleFilter(qf.id as FilterId)}
                 style={{
                   ...MONO, fontSize: 9, padding: '3px 8px', borderRadius: 10, cursor: 'pointer',
-                  border: `1px solid ${sc.activeFilters.includes(f.id as FilterId) ? 'var(--accent)' : 'var(--border)'}`,
-                  background: sc.activeFilters.includes(f.id as FilterId) ? 'rgba(0,229,160,0.1)' : 'transparent',
-                  color: sc.activeFilters.includes(f.id as FilterId) ? 'var(--accent)' : 'var(--text3)',
+                  border:     `1px solid ${sc.activeFilters.includes(qf.id as FilterId) ? 'var(--accent)' : 'var(--border)'}`,
+                  background: sc.activeFilters.includes(qf.id as FilterId) ? 'rgba(0,229,160,0.1)' : 'transparent',
+                  color:      sc.activeFilters.includes(qf.id as FilterId) ? 'var(--accent)' : 'var(--text3)',
                 }}>
-                {f.icon} {f.label}
+                {qf.icon} {qf.label}
               </button>
             ))}
             {sc.activeFilters.length > 0 && (
-              <button onClick={sc.clearFilters} style={{ ...MONO, fontSize: 9, padding: '3px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid rgba(255,61,90,0.3)', background: 'rgba(255,61,90,0.07)', color: '#ff3d5a' }}>✕ Clear</button>
+              <button onClick={sc.clearFilters} style={{
+                ...MONO, fontSize: 9, padding: '3px 8px', borderRadius: 10, cursor: 'pointer',
+                border: '1px solid rgba(255,61,90,0.3)', background: 'rgba(255,61,90,0.07)', color: '#ff3d5a',
+              }}>✕ Clear</button>
             )}
           </div>
 
-          {/* Error */}
+          {/* ── Error ───────────────────────────────────────────────────── */}
           {sc.screenerError && (
-            <div style={{ ...MONO, fontSize: 10, color: '#ff3d5a', marginBottom: 8, padding: '6px 10px', background: 'rgba(255,61,90,0.08)', borderRadius: 6 }}>
+            <div style={{ ...MONO, fontSize: 10, color: '#ff3d5a', marginBottom: 8,
+              padding: '6px 10px', background: 'rgba(255,61,90,0.08)', borderRadius: 6 }}>
               {sc.screenerError}
             </div>
           )}
 
-          {/* Stack flip alerts —  */}
+          {/* ── Stack flip alerts ────────────────────────────────────────── */}
           {sc.stackFlipAlerts.length > 0 && (
-            <div style={{ marginBottom: 8, padding: '6px 10px', background: 'rgba(255,184,46,0.08)', borderRadius: 6, border: '1px solid rgba(255,184,46,0.2)' }}>
+            <div style={{ marginBottom: 8, padding: '6px 10px', background: 'rgba(255,184,46,0.08)',
+              borderRadius: 6, border: '1px solid rgba(255,184,46,0.2)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ ...MONO, fontSize: 9, fontWeight: 700, color: COL.amber }}>🔔 STACK FLIPS</span>
-                <button onClick={sc.clearStackFlips} style={{ ...MONO, fontSize: 8, color: COL.text3, background: 'none', border: 'none', cursor: 'pointer' }}>clear</button>
+                <button onClick={sc.clearStackFlips}
+                  style={{ ...MONO, fontSize: 8, color: COL.text3, background: 'none', border: 'none', cursor: 'pointer' }}>
+                  clear
+                </button>
               </div>
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
                 {sc.stackFlipAlerts.slice(0, 8).map((a, i) => (
-                  <span key={i} style={{ ...MONO, fontSize: 9, padding: '2px 7px', borderRadius: 10, background: a.dir === 'bull' ? 'rgba(0,229,160,0.15)' : 'rgba(255,61,90,0.15)', color: a.dir === 'bull' ? COL.bull : COL.bear }}>
+                  <span key={i} style={{
+                    ...MONO, fontSize: 9, padding: '2px 7px', borderRadius: 10,
+                    background: a.dir === 'bull' ? 'rgba(0,229,160,0.15)' : 'rgba(255,61,90,0.15)',
+                    color:      a.dir === 'bull' ? COL.bull : COL.bear,
+                  }}>
                     {a.dir === 'bull' ? '▲' : '▼'} {a.sym}
                   </span>
                 ))}
@@ -220,46 +415,57 @@ export default function ScreenerPanel() {
             </div>
           )}
 
-          {/* Results —  */}
+          {/* ── Results ──────────────────────────────────────────────────── */}
           {sc.screenerView === 'heatmap' ? (
-            /*  heatmap */
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
               {sc.screenerResults.map(r => (
-                <HeatmapCell key={r.sym} r={r} onClick={() => handleLoadSymbol(r.sym)} />
+                <HeatmapCell key={`${r.exchange}:${r.sym}`} r={r} onClick={() => handleLoadSymbol(r.sym)} />
               ))}
               {sc.screenerResults.length === 0 && !sc.screenerRunning && (
-                <div style={{ ...MONO, fontSize: 10, color: 'var(--text3)', padding: 20 }}>Run a scan to see results</div>
+                <div style={{ ...MONO, fontSize: 10, color: 'var(--text3)', padding: 20 }}>
+                  Run a scan to see results
+                </div>
               )}
             </div>
+
           ) : sc.screenerView === 'multitf' ? (
-            /*  multi-TF */
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
-                    {['Symbol','Price','5m','1h','4h'].map(h => (
-                      <th key={h} style={{ ...MONO, fontSize: 9, color: 'var(--text3)', textTransform: 'uppercase', padding: '5px 8px', textAlign: 'center', borderBottom: '1px solid var(--border)' }}>{h}</th>
+                    {['Symbol','Ex','Price','5m','1h','4h'].map(h => (
+                      <th key={h} style={{
+                        ...MONO, fontSize: 9, color: 'var(--text3)', textTransform: 'uppercase',
+                        padding: '5px 8px', textAlign: 'center', borderBottom: '1px solid var(--border)',
+                      }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {sc.screenerResults.map(r => (
-                    <MTFRow key={r.sym} r={r} onClick={() => handleLoadSymbol(r.sym)} />
+                    <MTFRow key={`${r.exchange}:${r.sym}`} r={r} onClick={() => handleLoadSymbol(r.sym)} />
                   ))}
                 </tbody>
               </table>
             </div>
+
           ) : (
-            /*  sortable table */
+            /* ── Sortable table ─────────────────────────────────────────── */
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 700 }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 740 }}>
                 <thead>
                   <tr>
                     <th style={{ ...MONO, fontSize: 9, color: 'var(--text3)', padding: '5px 8px', textAlign: 'left', borderBottom: '1px solid var(--border)', textTransform: 'uppercase' }}>Symbol</th>
+                    <th style={{ ...MONO, fontSize: 9, color: 'var(--text3)', padding: '5px 4px', textAlign: 'left', borderBottom: '1px solid var(--border)', textTransform: 'uppercase' }}>Ex</th>
                     {([
-                      ['price','Price'], ['change24h','24h%'], ['volume24h','Vol'],
-                      ['rsi','RSI'], ['adx','ADX'], ['score','Score'],
-                      ['ema9','E9'], ['stBull','ST'],
+                      ['price',     'Price'],
+                      ['change24h', '24h%'],
+                      ['volume24h', 'Vol'],
+                      ['rsi',       'RSI'],
+                      ['adx',       'ADX'],
+                      ['score',     'Score'],
+                      ['ema9',      'E9'],
+                      ['stBull',    'ST'],
                     ] as [keyof ScreenerResult, string][]).map(([col, label]) => (
                       <Th key={col} col={col} label={label} sortCol={sc.sortCol} sortDir={sc.sortDir} onSort={sc.setSortCol} />
                     ))}
@@ -271,12 +477,17 @@ export default function ScreenerPanel() {
                     const bull = r.ema9 && r.ema20 && r.ema50 && r.ema9 > r.ema20 && r.ema20 > r.ema50;
                     const bear = r.ema9 && r.ema20 && r.ema50 && r.ema9 < r.ema20 && r.ema20 < r.ema50;
                     return (
-                      <tr key={r.sym} onClick={() => handleLoadSymbol(r.sym)}
+                      <tr key={`${r.exchange}:${r.sym}`}
+                        onClick={() => handleLoadSymbol(r.sym)}
                         style={{ cursor: 'pointer', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)' }}
                         onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.04)')}
-                        onMouseLeave={e => (e.currentTarget.style.background = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)')}>
+                        onMouseLeave={e => (e.currentTarget.style.background = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.012)')}
+                      >
                         <td style={{ ...MONO, fontSize: 10, fontWeight: 700, padding: '5px 8px', color: bull ? COL.bull : bear ? COL.bear : 'var(--text)' }}>
                           {r.sym.replace('USDT','')}
+                        </td>
+                        <td style={{ padding: '5px 4px' }}>
+                          <ExBadge ex={r.exchange ?? 'binance'} />
                         </td>
                         <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right', color: 'var(--text)' }}>{fmtP(r.price)}</td>
                         <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right', color: r.change24h >= 0 ? COL.bull : COL.bear }}>
@@ -287,23 +498,33 @@ export default function ScreenerPanel() {
                           color: r.rsi == null ? COL.text3 : r.rsi > 70 ? COL.bear : r.rsi < 30 ? COL.bull : COL.amber }}>
                           {f(r.rsi, 0)}
                         </td>
-                        <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right', color: r.adx != null && r.adx > 25 ? COL.purple : COL.text3 }}>
+                        <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right',
+                          color: r.adx != null && r.adx > 25 ? COL.purple : COL.text3 }}>
                           {f(r.adx, 0)}
                         </td>
                         <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right' }}>
-                          {r.score > 0 ? (
-                            <span style={{ background: 'rgba(167,139,255,0.15)', color: COL.purple, padding: '1px 7px', borderRadius: 10, fontSize: 9, fontWeight: 700 }}>{r.score}</span>
-                          ) : '—'}
+                          <span style={{
+                            background: r.score >= 5 ? 'rgba(167,139,255,0.2)' : r.score >= 2 ? 'rgba(167,139,255,0.1)' : 'transparent',
+                            color:      r.score >= 5 ? COL.purple : r.score >= 2 ? COL.purple : COL.text3,
+                            padding: '1px 7px', borderRadius: 10, fontSize: 9,
+                            fontWeight: r.score > 0 ? 700 : 400,
+                          }}>
+                            {r.score}/17
+                          </span>
                         </td>
                         <td style={{ ...MONO, fontSize: 9, padding: '5px 8px', textAlign: 'right', color: COL.text2 }}>{f(r.ema9, 4)}</td>
-                        <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right', color: r.stBull === null ? COL.text3 : r.stBull ? COL.bull : COL.bear }}>
+                        <td style={{ ...MONO, fontSize: 10, padding: '5px 8px', textAlign: 'right',
+                          color: r.stBull === null ? COL.text3 : r.stBull ? COL.bull : COL.bear }}>
                           {r.stBull === null ? '—' : r.stBull ? '▲' : '▼'}
                         </td>
                         <td style={{ ...MONO, fontSize: 8, padding: '5px 8px', maxWidth: 160, overflow: 'hidden' }}>
                           {r.filters.slice(0, 3).map(fi => {
                             const def = QUICK_FILTERS.find(qf => qf.id === fi);
                             return (
-                              <span key={fi} style={{ display: 'inline-block', marginRight: 3, padding: '1px 5px', borderRadius: 8, background: 'rgba(0,229,160,0.1)', color: COL.bull, fontSize: 8 }}>
+                              <span key={fi} style={{
+                                display: 'inline-block', marginRight: 3, padding: '1px 5px',
+                                borderRadius: 8, background: 'rgba(0,229,160,0.1)', color: COL.bull, fontSize: 8,
+                              }}>
                                 {def?.icon} {def?.label.split(' ')[0]}
                               </span>
                             );
@@ -314,9 +535,13 @@ export default function ScreenerPanel() {
                     );
                   })}
                   {sc.screenerResults.length === 0 && !sc.screenerRunning && (
-                    <tr><td colSpan={10} style={{ ...MONO, fontSize: 10, color: 'var(--text3)', padding: '20px 8px', textAlign: 'center' }}>
-                      Select a watchlist and click Run Scan
-                    </td></tr>
+                    <tr>
+                      <td colSpan={11} style={{ ...MONO, fontSize: 10, color: 'var(--text3)', padding: '20px 8px', textAlign: 'center' }}>
+                        {sc.allPairsMode
+                          ? `Click Run Scan to screen all USDT pairs on ${EXCHANGE_LABELS[sc.exchange]}`
+                          : `Select a watchlist and click Run Scan (${EXCHANGE_LABELS[sc.exchange]})`}
+                      </td>
+                    </tr>
                   )}
                 </tbody>
               </table>
@@ -325,9 +550,17 @@ export default function ScreenerPanel() {
         </div>
       )}
 
-      {/* ── WATCHLIST TAB —  ────────────────────────────────────── */}
+      {/* ── WATCHLIST TAB ─────────────────────────────────────────────────── */}
       {tab === 'watchlist' && (
         <div style={{ padding: 12 }}>
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: 'rgba(77,166,255,0.06)',
+            border: '1px solid rgba(77,166,255,0.2)', borderRadius: 6 }}>
+            <span style={{ ...MONO, fontSize: 9, color: COL.blue }}>
+              💡 To scan all coins on {EXCHANGE_LABELS[sc.exchange]}, use the <strong>🌍 All Pairs</strong> button in the Scan tab.
+              Symbol format: BTCUSDT (same across Binance, Bybit, OKX internally).
+            </span>
+          </div>
+
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
             {sc.watchlists.map(wl => (
               <button key={wl.id} onClick={() => sc.setActiveWatchlist(wl.id)}
@@ -356,8 +589,6 @@ export default function ScreenerPanel() {
                   </button>
                 )}
               </div>
-
-              {/* Symbol grid */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
                 {activeWl.syms.map(sym => (
                   <div key={sym} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 6, background: 'var(--bg3)', border: '1px solid var(--border)' }}>
@@ -369,8 +600,6 @@ export default function ScreenerPanel() {
                   </div>
                 ))}
               </div>
-
-              {/* Add symbol */}
               {!activeWl.preset && (
                 <div style={{ display: 'flex', gap: 6 }}>
                   <input value={sc.customSymInput} onChange={e => sc.setCustomSymInput(e.target.value)}
@@ -386,7 +615,7 @@ export default function ScreenerPanel() {
         </div>
       )}
 
-      {/* ── WEBHOOKS TAB —  ─────────────────────────────────────── */}
+      {/* ── WEBHOOKS TAB ──────────────────────────────────────────────────── */}
       {tab === 'webhooks' && (
         <div style={{ padding: 12 }}>
           <div style={{ marginBottom: 12 }}>
@@ -416,35 +645,30 @@ export default function ScreenerPanel() {
               }} style={btnStyle(false)}>+ Add</button>
             </div>
           </div>
-
           {sc.webhooks.length === 0 ? (
             <div style={{ ...MONO, fontSize: 10, color: 'var(--text3)' }}>No webhooks configured</div>
-          ) : (
-            sc.webhooks.map(w => (
-              <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg3)', borderRadius: 6, marginBottom: 6, border: '1px solid var(--border)' }}>
-                <span style={{ ...MONO, fontSize: 10, fontWeight: 700, color: 'var(--text)' }}>{w.name}</span>
-                <span style={{ ...MONO, fontSize: 9, color: 'var(--text3)' }}>{w.type}</span>
-                <span style={{ ...MONO, fontSize: 9, color: 'var(--text3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.url}</span>
-                <button onClick={() => sc.updateWebhook(w.id, { enabled: !w.enabled })} style={btnStyle(w.enabled, w.enabled ? COL.bull : undefined)}>
-                  {w.enabled ? 'ON' : 'OFF'}
-                </button>
-                <button onClick={() => sc.removeWebhook(w.id)} style={{ ...MONO, fontSize: 9, color: '#ff3d5a', background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
-              </div>
-            ))
-          )}
-
+          ) : sc.webhooks.map(w => (
+            <div key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--bg3)', borderRadius: 6, marginBottom: 6, border: '1px solid var(--border)' }}>
+              <span style={{ ...MONO, fontSize: 10, fontWeight: 700, color: 'var(--text)' }}>{w.name}</span>
+              <span style={{ ...MONO, fontSize: 9, color: 'var(--text3)' }}>{w.type}</span>
+              <span style={{ ...MONO, fontSize: 9, color: 'var(--text3)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{w.url}</span>
+              <button onClick={() => sc.updateWebhook(w.id, { enabled: !w.enabled })} style={btnStyle(w.enabled, w.enabled ? COL.bull : undefined)}>
+                {w.enabled ? 'ON' : 'OFF'}
+              </button>
+              <button onClick={() => sc.removeWebhook(w.id)} style={{ ...MONO, fontSize: 9, color: '#ff3d5a', background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
+            </div>
+          ))}
           <button onClick={sc.sendWebhooks} style={{ ...btnStyle(false), marginTop: 8 }}>📤 Send Now</button>
         </div>
       )}
 
-      {/* ── KELLY TAB — ────────────────────────────────────────── */}
+      {/* ── KELLY TAB ─────────────────────────────────────────────────────── */}
       {tab === 'kelly' && (
         <div style={{ padding: 16, maxWidth: 400 }}>
           <div style={{ ...MONO, fontSize: 11, fontWeight: 700, color: 'var(--text)', marginBottom: 12 }}>📐 Kelly Criterion Sizing</div>
-
           {[
-            { key: 'winRate', label: 'Win Rate %', placeholder: '55' },
-            { key: 'avgWinR', label: 'Avg Win (R)', placeholder: '1.5' },
+            { key: 'winRate',  label: 'Win Rate %',   placeholder: '55'  },
+            { key: 'avgWinR',  label: 'Avg Win (R)',  placeholder: '1.5' },
             { key: 'avgLossR', label: 'Avg Loss (R)', placeholder: '1.0' },
           ].map(({ key, label, placeholder }) => (
             <div key={key} style={{ marginBottom: 10 }}>
@@ -456,11 +680,9 @@ export default function ScreenerPanel() {
                 style={{ ...MONO, fontSize: 12, padding: '6px 10px', borderRadius: 6, background: 'var(--bg3)', border: '1px solid var(--border2)', color: 'var(--text)', width: '100%' }} />
             </div>
           ))}
-
           <button onClick={sc.calcKellyResult} style={{ ...btnStyle(true), width: '100%', marginTop: 4, justifyContent: 'center' }}>
             Calculate Kelly %
           </button>
-
           {sc.kelly.kellyPct !== null && (
             <div style={{ marginTop: 16, padding: '12px 16px', background: 'rgba(0,229,160,0.06)', border: '1px solid rgba(0,229,160,0.2)', borderRadius: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -472,7 +694,7 @@ export default function ScreenerPanel() {
                 <span style={{ ...MONO, fontSize: 14, fontWeight: 700, color: COL.amber }}>{sc.kelly.halfKelly?.toFixed(1)}%</span>
               </div>
               <div style={{ ...MONO, fontSize: 9, color: 'var(--text3)', marginTop: 10, lineHeight: 1.5 }}>
-                Half-Kelly reduces variance while preserving ~75% of optimal growth. Use this as your risk-per-trade % in position sizing.
+                Half-Kelly reduces variance while preserving ~75% of optimal growth.
               </div>
             </div>
           )}
@@ -481,6 +703,8 @@ export default function ScreenerPanel() {
     </div>
   );
 }
+
+// ── Strategy card actions (unchanged) ─────────────────────────────────────────
 
 export function StrategyCardActions({ stratId, enabled }: { stratId: string; enabled: boolean }) {
   const { exportStrategy, importStrategy, duplicateStrategy, toggleStrategyEnabled } = useStore();
@@ -493,7 +717,7 @@ export function StrategyCardActions({ stratId, enabled }: { stratId: string; ena
     const reader = new FileReader();
     reader.onload = ev => {
       const json = ev.target?.result as string;
-      const res = importStrategy?.(json);
+      const res  = importStrategy?.(json);
       if (res && !res.ok) setImportErr(res.error ?? 'Import failed');
       else setImportErr('');
     };
@@ -503,39 +727,16 @@ export function StrategyCardActions({ stratId, enabled }: { stratId: string; ena
 
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
-      {/* enable/disable toggle */}
-      <button onClick={() => toggleStrategyEnabled?.(stratId)}
-        style={{
-          fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer',
-          border: `1px solid ${enabled ? 'rgba(0,229,160,0.4)' : 'var(--border)'}`,
-          background: enabled ? 'rgba(0,229,160,0.1)' : 'transparent',
-          color: enabled ? '#00e5a0' : 'var(--text3)',
-        }}>
-        {enabled ? '● ON' : '○ OFF'}
-      </button>
-
-      {/* duplicate */}
-      <button onClick={() => duplicateStrategy?.(stratId)}
-        title="Duplicate strategy"
-        style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>
-        ⧉ Copy
-      </button>
-
-      {/* export */}
-      <button onClick={() => exportStrategy?.(stratId)}
-        title="Export as JSON"
-        style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>
-        ⬇ Export
-      </button>
-
-      {/* import */}
-      <button onClick={() => fileRef.current?.click()}
-        title="Import JSON"
-        style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>
-        ⬆ Import
-      </button>
+      <button onClick={() => toggleStrategyEnabled?.(stratId)} style={{
+        fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer',
+        border: `1px solid ${enabled ? 'rgba(0,229,160,0.4)' : 'var(--border)'}`,
+        background: enabled ? 'rgba(0,229,160,0.1)' : 'transparent',
+        color: enabled ? '#00e5a0' : 'var(--text3)',
+      }}>{enabled ? '● ON' : '○ OFF'}</button>
+      <button onClick={() => duplicateStrategy?.(stratId)} style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>⧉ Copy</button>
+      <button onClick={() => exportStrategy?.(stratId)} style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>⬇ Export</button>
+      <button onClick={() => fileRef.current?.click()} style={{ fontFamily: 'var(--mono)', fontSize: 9, padding: '2px 8px', borderRadius: 10, cursor: 'pointer', border: '1px solid var(--border)', background: 'transparent', color: 'var(--text3)' }}>⬆ Import</button>
       <input ref={fileRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleImport} />
-
       {importErr && <span style={{ fontFamily: 'var(--mono)', fontSize: 8, color: '#ff3d5a' }}>{importErr}</span>}
     </div>
   );

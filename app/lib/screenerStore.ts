@@ -3,12 +3,14 @@ import { persist } from 'zustand/middleware';
 import { useStore } from './store';
 import type {
   ScreenerResult, FilterId, WatchlistGroup, ScreenerView,
-  AutoRefreshConfig, WebhookConfig, StackFlipAlert,
+  AutoRefreshConfig, WebhookConfig, StackFlipAlert, ExchangeId,
 } from './screener';
 import {
   runScreener, runMultiTFScan, PRESET_WATCHLISTS,
   exportScreenerCSV, sendWebhook, checkStackFlips,
+  fetchAllUSDTPairs,
 } from './screener';
+import { EXCHANGE_LABELS } from './exchangeAdapters';
 import type { Strategy } from './strategy';
 import { PRESET_STRATEGIES } from './strategy';
 import type { Candle } from './indicators';
@@ -18,16 +20,15 @@ import type { Candle } from './indicators';
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function calcKelly(winRate: number, avgWinR: number, avgLossR: number): number {
-  // Kelly % = W/A - (1-W)/B where W=winRate, A=avgLoss, B=avgWin
   if (avgWinR <= 0 || avgLossR <= 0) return 0;
   const k = (winRate / avgLossR) - ((1 - winRate) / avgWinR);
-  return Math.max(0, Math.min(k * 100, 25)); // cap at 25% for safety (half-Kelly style)
+  return Math.max(0, Math.min(k * 100, 25));
 }
 
 export interface KellyState {
-  winRate:   string;   // as % string e.g. "55"
-  avgWinR:   string;   // avg win in R
-  avgLossR:  string;   // avg loss in R
+  winRate:   string;
+  avgWinR:   string;
+  avgLossR:  string;
   kellyPct:  number | null;
   halfKelly: number | null;
 }
@@ -46,28 +47,38 @@ interface ScreenerState {
   sortCol:           keyof ScreenerResult;
   sortDir:           'asc' | 'desc';
 
-  //  watchlist
+  // watchlist
   watchlists:        WatchlistGroup[];
   activeWatchlistId: string;
   customSymInput:    string;
 
-  //strategy scan
+  // strategy scan
   scanStrategyId:    string | null;
 
-  //auto-refresh
+  // auto-refresh
   autoRefresh:       AutoRefreshConfig;
 
-  //  stack flip alerts
+  // stack flip alerts
   stackFlipAlerts:   StackFlipAlert[];
 
-  //  view
+  // view
   screenerView:      ScreenerView;
 
   // webhooks
   webhooks:          WebhookConfig[];
 
-  //  Kelly
+  // Kelly
   kelly:             KellyState;
+
+  // ── Exchange ────────────────────────────────────────────────────────────────
+  /** Currently selected exchange */
+  exchange:          ExchangeId;
+
+  // ── All-pairs mode ─────────────────────────────────────────────────────────
+  allPairsMode:      boolean;
+  fetchingPairs:     boolean;
+  allPairsCount:     number;
+  allPairsMinVol:    number;
 
   // Actions
   runScan:               () => Promise<void>;
@@ -77,6 +88,8 @@ interface ScreenerState {
   clearFilters:          () => void;
   setSortCol:            (col: keyof ScreenerResult) => void;
   setScreenerView:       (v: ScreenerView) => void;
+  // Exchange
+  setExchange:           (id: ExchangeId) => void;
   // Watchlist
   setActiveWatchlist:    (id: string) => void;
   addCustomSym:          (sym: string) => void;
@@ -101,6 +114,9 @@ interface ScreenerState {
   // Kelly
   setKellyInput:         (field: keyof Omit<KellyState,'kellyPct'|'halfKelly'>, val: string) => void;
   calcKellyResult:       () => void;
+  // All-pairs mode
+  setAllPairsMode:       (enabled: boolean) => void;
+  setAllPairsMinVol:     (minVol: number) => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -133,21 +149,49 @@ export const useScreenerStore = create<ScreenerState>()(
       webhooks:          [],
       kelly:             { winRate: '55', avgWinR: '1.5', avgLossR: '1', kellyPct: null, halfKelly: null },
 
-      // Run scan ────────────────────────────────────────
+      // Exchange — default Binance
+      exchange:          'binance',
+
+      // All-pairs defaults
+      allPairsMode:      false,
+      fetchingPairs:     false,
+      allPairsCount:     0,
+      allPairsMinVol:    0,
+
+      // ── Run scan ──────────────────────────────────────────────────────────
       runScan: async () => {
         const s = get();
         abortController?.abort();
         abortController = new AbortController();
 
-        const wl = s.watchlists.find(w => w.id === s.activeWatchlistId);
-        if (!wl || !wl.syms.length) {
-          set({ screenerError: 'No symbols in watchlist', screenerRunning: false }); return;
+        set({ screenerRunning: true, screenerError: null, screenerProgress: { done: 0, total: 0 } });
+
+        // ── Resolve symbol list ───────────────────────────────────────────
+        let syms: string[];
+
+        if (s.allPairsMode) {
+          set({ fetchingPairs: true });
+          try {
+            // Pass current exchange to pair fetcher
+            const allPairs = await fetchAllUSDTPairs(s.exchange);
+            syms = allPairs;
+            set({ allPairsCount: allPairs.length, fetchingPairs: false,
+                  screenerProgress: { done: 0, total: allPairs.length } });
+          } catch (e) {
+            set({ screenerRunning: false, fetchingPairs: false, screenerError: `Failed to fetch pairs: ${String(e)}` });
+            return;
+          }
+        } else {
+          const wl = s.watchlists.find(w => w.id === s.activeWatchlistId);
+          if (!wl || !wl.syms.length) {
+            set({ screenerError: 'No symbols in watchlist', screenerRunning: false }); return;
+          }
+          syms = wl.syms;
+          set({ screenerProgress: { done: 0, total: syms.length } });
         }
 
-        set({ screenerRunning: true, screenerError: null, screenerProgress: { done: 0, total: wl.syms.length } });
-
         try {
-          // : build strategy evaluator
+          // ── Build optional strategy evaluator ────────────────────────────
           interface StratEvalResult {
             dir:     'long' | 'short';
             score:   number;
@@ -160,27 +204,20 @@ export const useScreenerStore = create<ScreenerState>()(
             const strat = allStrats.find(st => st.id === s.scanStrategyId);
             if (strat) {
               stratEval = (_sym, candles) => {
-                // Uses canonical EMA logic from indicators.ts via makeEMAState / updEMA.
-                // Requires ≥30 bars for warm-up reliability.
                 if (candles.length < 30) return null;
-
-                let e9: number | null = null;
-                let e20: number | null = null;
-                let e50: number | null = null;
-                const k9 = 2 / (9 + 1), k20 = 2 / (20 + 1), k50 = 2 / (50 + 1);
-
+                let e9: number|null  = null;
+                let e20: number|null = null;
+                let e50: number|null = null;
+                const k9 = 2/10, k20 = 2/21, k50 = 2/51;
                 for (const c of candles) {
-                  e9  = e9  === null ? c.c : c.c * k9  + e9  * (1 - k9);
-                  e20 = e20 === null ? c.c : c.c * k20 + e20 * (1 - k20);
-                  e50 = e50 === null ? c.c : c.c * k50 + e50 * (1 - k50);
+                  e9  = e9  === null ? c.c : c.c * k9  + e9  * (1-k9);
+                  e20 = e20 === null ? c.c : c.c * k20 + e20 * (1-k20);
+                  e50 = e50 === null ? c.c : c.c * k50 + e50 * (1-k50);
                 }
-
                 if (e9 === null || e20 === null || e50 === null) return null;
-
                 const bull = e9 > e20 && e20 > e50;
                 const bear = e9 < e20 && e20 < e50;
                 if (!bull && !bear) return null;
-
                 return {
                   dir:     bull ? 'long' : 'short',
                   score:   75,
@@ -190,42 +227,54 @@ export const useScreenerStore = create<ScreenerState>()(
             }
           }
 
+          // ── Execute scan — pass exchange ─────────────────────────────────
           let results: ScreenerResult[];
           if (s.screenerView === 'multitf') {
             results = await runMultiTFScan(
-              wl.syms, ['5m', '1h', '4h'],
+              syms, ['5m', '1h', '4h'],
               (done, total) => set({ screenerProgress: { done, total } }),
               abortController.signal,
+              s.exchange,  // ← new
             );
           } else {
             results = await runScreener(
-              wl.syms, s.screenerTf, s.activeFilters,
-              (done, total, latest) => set({ screenerProgress: { done, total } }),
+              syms, s.screenerTf, s.activeFilters,
+              (done, total) => set({ screenerProgress: { done, total } }),
               abortController.signal,
               stratEval,
+              s.exchange,  // ← new
             );
           }
 
-          //  check stack flips
-          const flips = checkStackFlips(results, flip => {
+          // ── Apply minVol post-filter in all-pairs mode ───────────────────
+          const { allPairsMode, allPairsMinVol } = get();
+          if (allPairsMode && allPairsMinVol > 0) {
+            results = results.filter(r => r.volume24h >= allPairsMinVol);
+          }
+
+          // ── Stack flip detection ─────────────────────────────────────────
+          checkStackFlips(results, flip => {
             set(st => ({ stackFlipAlerts: [flip, ...st.stackFlipAlerts].slice(0, 50) }));
           });
 
-          // Sort
+          // ── Sort ─────────────────────────────────────────────────────────
+          const col = s.sortCol as string;
           const sorted = [...results].sort((a, b) => {
-            const col = s.sortCol as string;
             const av = (a[col as keyof ScreenerResult] as number) ?? 0;
             const bv = (b[col as keyof ScreenerResult] as number) ?? 0;
             return s.sortDir === 'desc' ? bv - av : av - bv;
           });
 
           set({
-            screenerResults:  sorted,
-            screenerRunning:  false,
-            autoRefresh: { ...s.autoRefresh, lastRefresh: Date.now(), nextRefresh: Date.now() + s.autoRefresh.intervalSec * 1000 },
+            screenerResults: sorted,
+            screenerRunning: false,
+            autoRefresh: {
+              ...s.autoRefresh,
+              lastRefresh: Date.now(),
+              nextRefresh: Date.now() + s.autoRefresh.intervalSec * 1000,
+            },
           });
 
-          // Auto-send webhooks after scan
           get().sendWebhooks();
 
         } catch (e) {
@@ -235,12 +284,11 @@ export const useScreenerStore = create<ScreenerState>()(
 
       abortScan: () => {
         abortController?.abort();
-        set({ screenerRunning: false });
+        set({ screenerRunning: false, fetchingPairs: false });
       },
 
       setScreenerTf: (tf) => set({ screenerTf: tf }),
 
-      //  filter toggles
       toggleFilter: (id) => set(s => ({
         activeFilters: s.activeFilters.includes(id)
           ? s.activeFilters.filter(f => f !== id)
@@ -248,21 +296,27 @@ export const useScreenerStore = create<ScreenerState>()(
       })),
       clearFilters: () => set({ activeFilters: [] }),
 
-      //  sort
       setSortCol: (col) => set(s => ({
         sortCol: col,
         sortDir: s.sortCol === col && s.sortDir === 'desc' ? 'asc' : 'desc',
         screenerResults: [...s.screenerResults].sort((a, b) => {
-        const av = (a[col as keyof ScreenerResult] as number) ?? 0;
-        const bv = (b[col as keyof ScreenerResult] as number) ?? 0;
+          const av = (a[col as keyof ScreenerResult] as number) ?? 0;
+          const bv = (b[col as keyof ScreenerResult] as number) ?? 0;
           return (s.sortCol === col && s.sortDir === 'desc') ? av - bv : bv - av;
         }),
       })),
 
-      //  view
       setScreenerView: (v) => set({ screenerView: v }),
 
-      //  watchlist management
+      // ── Exchange ──────────────────────────────────────────────────────────
+      setExchange: (id) => set({
+        exchange:        id,
+        screenerResults: [],   // clear stale results from old exchange
+        allPairsCount:   0,
+        screenerError:   null,
+      }),
+
+      // Watchlist
       setActiveWatchlist: (id) => set({ activeWatchlistId: id }),
       setCustomSymInput: (v) => set({ customSymInput: v.toUpperCase() }),
 
@@ -295,10 +349,8 @@ export const useScreenerStore = create<ScreenerState>()(
         watchlists: s.watchlists.map(w => w.id === id && !w.preset ? { ...w, name } : w),
       })),
 
-      // 
       setScanStrategy: (id) => set({ scanStrategyId: id }),
 
-      //auto-refresh
       setAutoRefresh: (enabled, intervalSec) => {
         if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
         const cfg = { ...get().autoRefresh, enabled, ...(intervalSec ? { intervalSec } : {}) };
@@ -311,16 +363,13 @@ export const useScreenerStore = create<ScreenerState>()(
       tickAutoRefresh: () => {
         const s = get();
         if (!s.autoRefresh.enabled) return;
-        const now = Date.now();
-        if (now >= s.autoRefresh.nextRefresh && !s.screenerRunning) {
+        if (Date.now() >= s.autoRefresh.nextRefresh && !s.screenerRunning) {
           get().runScan();
         }
       },
 
-      // 
       clearStackFlips: () => set({ stackFlipAlerts: [] }),
 
-      // : webhooks
       addWebhook: (cfg) => set(s => ({
         webhooks: [...s.webhooks, { ...cfg, id: Date.now().toString(36) }],
       })),
@@ -336,25 +385,26 @@ export const useScreenerStore = create<ScreenerState>()(
         }
       },
 
-      //  CSV export
       exportCSV: () => {
         const { screenerResults, screenerTf } = get();
         exportScreenerCSV(screenerResults, screenerTf);
       },
 
-      //  Kelly
       setKellyInput: (field, val) => set(s => ({ kelly: { ...s.kelly, [field]: val } })),
       calcKellyResult: () => {
         const { kelly } = get();
-        const wr  = parseFloat(kelly.winRate) / 100;
-        const aw  = parseFloat(kelly.avgWinR);
-        const al  = parseFloat(kelly.avgLossR);
+        const wr = parseFloat(kelly.winRate) / 100;
+        const aw = parseFloat(kelly.avgWinR);
+        const al = parseFloat(kelly.avgLossR);
         if (isNaN(wr) || isNaN(aw) || isNaN(al)) return;
-        const k    = calcKelly(wr, aw, al);
-        const half = k / 2;
-        set({ kelly: { ...get().kelly, kellyPct: k, halfKelly: half } });
+        const k = calcKelly(wr, aw, al);
+        set({ kelly: { ...get().kelly, kellyPct: k, halfKelly: k / 2 } });
       },
+
+      setAllPairsMode:  (enabled) => set({ allPairsMode: enabled }),
+      setAllPairsMinVol: (minVol) => set({ allPairsMinVol: minVol }),
     }),
+
     {
       name: 'screener_store',
       partialize: (s) => ({
@@ -365,10 +415,13 @@ export const useScreenerStore = create<ScreenerState>()(
         sortCol:           s.sortCol,
         sortDir:           s.sortDir,
         screenerView:      s.screenerView,
-        autoRefresh:       { ...s.autoRefresh, enabled: false }, // don't persist running state
+        autoRefresh:       { ...s.autoRefresh, enabled: false },
         webhooks:          s.webhooks,
         scanStrategyId:    s.scanStrategyId,
         kelly:             s.kelly,
+        exchange:          s.exchange,    // ← persist selected exchange
+        allPairsMode:      s.allPairsMode,
+        allPairsMinVol:    s.allPairsMinVol,
       }),
     }
   )
